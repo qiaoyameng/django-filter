@@ -1,4 +1,5 @@
 import copy
+import heapq
 import warnings
 from collections import OrderedDict
 from enum import Enum
@@ -10,7 +11,8 @@ from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOn
 from django.http import QueryDict
 
 from .conf import settings
-from .constants import ALL_FIELDS
+from .constants import ALL_FIELDS, EMPTY_VALUES
+from .exceptions import FilterDependencyError
 from .filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -51,6 +53,63 @@ class UnknownFieldBehavior(Enum):
     IGNORE = "ignore"
 
 
+def resolve_filter_execution_order(filters):
+    """
+    Validate the ``depends_on`` declarations of the given filters and return
+    the filter names in an execution order that satisfies them.
+
+    Filters that do not take part in any dependency keep their declaration
+    order, and whenever several orders are valid the declaration order is
+    preserved. Raises a ``ValueError`` with a readable message for unknown
+    names, self-dependencies, and dependency cycles.
+    """
+    for name, filter_ in filters.items():
+        for dependency in filter_.depends_on:
+            if dependency == name:
+                raise ValueError(
+                    "Filter '%s' cannot depend on itself." % name
+                )
+            if dependency not in filters:
+                raise ValueError(
+                    "Filter '%s' depends on unknown filter '%s'."
+                    % (name, dependency)
+                )
+
+    dependents = {name: [] for name in filters}
+    in_degree = {name: 0 for name in filters}
+    for name, filter_ in filters.items():
+        for dependency in filter_.depends_on:
+            in_degree[name] += 1
+            dependents[dependency].append(name)
+
+    positions = {name: position for position, name in enumerate(filters)}
+    ready = [
+        (position, name)
+        for name, position in positions.items()
+        if in_degree[name] == 0
+    ]
+    heapq.heapify(ready)
+
+    order = []
+    while ready:
+        _, name = heapq.heappop(ready)
+        order.append(name)
+        for dependent in dependents[name]:
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                heapq.heappush(ready, (positions[dependent], dependent))
+
+    if len(order) != len(filters):
+        remaining = ", ".join(
+            "'%s'" % name for name in filters if in_degree[name] > 0
+        )
+        raise ValueError(
+            "Circular filter dependencies detected involving: %s." % remaining
+        )
+
+    return order
+
+
 class FilterSetOptions:
     def __init__(self, options=None):
         self.model = getattr(options, "model", None)
@@ -80,6 +139,9 @@ class FilterSetMetaclass(type):
         new_class = super().__new__(cls, name, bases, attrs)
         new_class._meta = FilterSetOptions(getattr(new_class, "Meta", None))
         new_class.base_filters = new_class.get_filters()
+        new_class._filter_execution_order = resolve_filter_execution_order(
+            new_class.base_filters
+        )
 
         return new_class
 
@@ -202,11 +264,21 @@ class BaseFilterSet:
         self.form_prefix = prefix
 
         self.filters = copy.deepcopy(self.base_filters)
+        self._filter_contexts = {}
 
         # propagate the model and filterset to the filters
         for filter_ in self.filters.values():
             filter_.model = model
             filter_.parent = self
+
+    @property
+    def filter_contexts(self):
+        """
+        Contexts produced by the filters that have run during the current
+        evaluation, keyed by filter name. A filter may read the context of
+        its declared ``depends_on`` dependencies here.
+        """
+        return self._filter_contexts
 
     def is_valid(self):
         """
@@ -229,8 +301,37 @@ class BaseFilterSet:
         This method should be overridden if additional filtering needs to be
         applied to the queryset before it is cached.
         """
-        for name, value in self.form.cleaned_data.items():
-            queryset = self.filters[name].filter(queryset, value)
+        cleaned_data = self.form.cleaned_data
+        self._filter_contexts = {}
+
+        for name in self._filter_execution_order:
+            filter_ = self.filters[name]
+
+            missing = [
+                dependency
+                for dependency in filter_.depends_on
+                if dependency not in self._filter_contexts
+            ]
+            if missing:
+                if (
+                    filter_.on_missing_dependency
+                    == Filter.ON_MISSING_DEPENDENCY_ERROR
+                ):
+                    raise FilterDependencyError(
+                        "Filter '%s' cannot be applied because its "
+                        "dependencies were not provided or failed "
+                        "validation: %s."
+                        % (name, ", ".join("'%s'" % dep for dep in missing))
+                    )
+                # 'skip' policy: never hand the filter an empty context.
+                continue
+
+            if name not in cleaned_data:
+                # The field failed validation; no cleaned value exists.
+                continue
+
+            value = cleaned_data[name]
+            queryset = filter_.filter(queryset, value)
             assert isinstance(
                 queryset, models.QuerySet
             ), "Expected '%s.%s' to return a QuerySet, but got a %s instead." % (
@@ -238,6 +339,10 @@ class BaseFilterSet:
                 name,
                 type(queryset).__name__,
             )
+
+            if value not in EMPTY_VALUES:
+                self._filter_contexts[name] = filter_.get_context(queryset, value)
+
         return queryset
 
     @property

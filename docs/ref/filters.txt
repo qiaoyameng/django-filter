@@ -112,6 +112,43 @@ span relationships. Defaults to ``False``.
 A boolean that specifies whether the Filter should use ``filter`` or ``exclude``
 on the queryset. Defaults to ``False``.
 
+``depends_on``
+~~~~~~~~~~~~~~
+
+An iterable of filter names that must be applied before this filter. The
+``FilterSet`` validates these declarations when the class is built — unknown
+names, self-dependencies, and cycles raise a ``ValueError`` — and applies
+filters in an order that satisfies them. Filters without dependencies keep
+their declaration order.
+
+After a dependency has been applied, its context is available to dependents
+via ``FilterSet.filter_contexts``. By default the context is the cleaned
+value; override ``Filter.get_context(qs, value)`` to expose additional data
+computed while filtering.
+
+.. code-block:: python
+
+    class F(FilterSet):
+        region = CharFilter(method='filter_region')
+        in_stock = CharFilter(method='filter_in_stock', depends_on=['region'])
+
+        def filter_region(self, queryset, name, value):
+            return queryset.filter(region=value)
+
+        def filter_in_stock(self, queryset, name, value):
+            region = self.filter_contexts['region']
+            return queryset.filter(warehouse__region=region, stock__gt=0)
+
+``on_missing_dependency``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The policy used when a declared dependency did not produce a context — for
+example because its field was not provided or failed validation. Must be
+``'skip'`` (the default) to silently skip the dependent filter, or
+``'error'`` to raise a
+:class:`~django_filters.exceptions.FilterDependencyError`. A dependent filter
+is never called with an empty or missing dependency context.
+
 ``required``
 ~~~~~~~~~~~~
 

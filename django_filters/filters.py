@@ -76,6 +76,10 @@ class Filter:
     creation_counter = 0
     field_class = forms.Field
 
+    #: Policies for handling a dependency that did not produce a context.
+    ON_MISSING_DEPENDENCY_SKIP = "skip"
+    ON_MISSING_DEPENDENCY_ERROR = "error"
+
     def __init__(
         self,
         field_name=None,
@@ -85,16 +89,28 @@ class Filter:
         method=None,
         distinct=False,
         exclude=False,
+        depends_on=None,
+        on_missing_dependency=ON_MISSING_DEPENDENCY_SKIP,
         **kwargs
     ):
         if lookup_expr is None:
             lookup_expr = settings.DEFAULT_LOOKUP_EXPR
+        if on_missing_dependency not in (
+            self.ON_MISSING_DEPENDENCY_SKIP,
+            self.ON_MISSING_DEPENDENCY_ERROR,
+        ):
+            raise ValueError(
+                "Invalid on_missing_dependency: %r. Expected 'skip' or 'error'."
+                % (on_missing_dependency,)
+            )
         self.field_name = field_name
         self.lookup_expr = lookup_expr
         self.label = label
         self.method = method
         self.distinct = distinct
         self.exclude = exclude
+        self.depends_on = tuple(depends_on or ())
+        self.on_missing_dependency = on_missing_dependency
 
         self.extra = kwargs
         self.extra.setdefault("required", False)
@@ -166,6 +182,14 @@ class Filter:
         lookup = "%s__%s" % (self.field_name, self.lookup_expr)
         qs = self.get_method(qs)(**{lookup: value})
         return qs
+
+    def get_context(self, qs, value):
+        """
+        Return the context shared with dependent filters once this filter
+        has been applied. Defaults to the cleaned value; override to expose
+        additional data computed while filtering.
+        """
+        return value
 
 
 class CharFilter(Filter):
