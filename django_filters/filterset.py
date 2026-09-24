@@ -9,6 +9,11 @@ from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.http import QueryDict
 
+from .conditions import (
+    DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_NODES,
+    compile_condition_tree,
+)
 from .conf import settings
 from .constants import ALL_FIELDS
 from .filters import (
@@ -190,7 +195,20 @@ FILTER_FOR_DBFIELD_DEFAULTS = {
 class BaseFilterSet:
     FILTER_DEFAULTS = FILTER_FOR_DBFIELD_DEFAULTS
 
-    def __init__(self, data=None, queryset=None, *, request=None, prefix=None):
+    #: Maximum nesting depth accepted by ``conditions`` (root node = 1).
+    condition_tree_max_depth = DEFAULT_MAX_DEPTH
+    #: Maximum number of nodes (groups and leaves) accepted by ``conditions``.
+    condition_tree_max_nodes = DEFAULT_MAX_NODES
+
+    def __init__(
+        self,
+        data=None,
+        queryset=None,
+        *,
+        request=None,
+        prefix=None,
+        conditions=None,
+    ):
         if queryset is None:
             queryset = self._meta.model._default_manager.all()
         model = queryset.model
@@ -200,6 +218,7 @@ class BaseFilterSet:
         self.queryset = queryset
         self.request = request
         self.form_prefix = prefix
+        self.conditions = conditions
 
         self.filters = copy.deepcopy(self.base_filters)
 
@@ -207,6 +226,23 @@ class BaseFilterSet:
         for filter_ in self.filters.values():
             filter_.model = model
             filter_.parent = self
+
+        # Compile the condition tree eagerly so that every error (invalid
+        # values, undeclared filters, non-composable filters, exceeded
+        # limits) is raised before any query is executed. Compilation is per
+        # instance, so compiled state never leaks between requests.
+        self._conditions_q = None
+        self._conditions_distinct = False
+        if conditions is not None:
+            (
+                self._conditions_q,
+                self._conditions_distinct,
+            ) = compile_condition_tree(
+                self,
+                conditions,
+                max_depth=self.condition_tree_max_depth,
+                max_nodes=self.condition_tree_max_nodes,
+            )
 
     def is_valid(self):
         """
@@ -238,6 +274,18 @@ class BaseFilterSet:
                 name,
                 type(queryset).__name__,
             )
+        return self.apply_conditions(queryset)
+
+    def apply_conditions(self, queryset):
+        """
+        Apply the compiled condition tree, when one was passed via
+        ``conditions``, after the ordinary query parameters have been
+        filtered.
+        """
+        if self._conditions_q is not None:
+            queryset = queryset.filter(self._conditions_q)
+            if self._conditions_distinct:
+                queryset = queryset.distinct()
         return queryset
 
     @property
@@ -248,6 +296,8 @@ class BaseFilterSet:
                 # ensure form validation before filtering
                 self.errors
                 qs = self.filter_queryset(qs)
+            else:
+                qs = self.apply_conditions(qs)
             self._qs = qs
         return self._qs
 

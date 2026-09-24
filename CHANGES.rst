@@ -1,3 +1,14 @@
+Unreleased
+----------
+
+* Added an optional ``conditions`` argument to ``FilterSet`` accepting a
+  nested ``and``/``or``/``not`` condition tree whose leaves reference
+  declared filters. Leaf values are cleaned through the filter's form
+  field, errors locate the offending node via ``ConditionTreeError.path``,
+  and tree depth/node count are limited. Filters opt into composition via
+  the new ``Filter.get_q()`` interface; custom ``method`` filters are
+  rejected before the query runs unless they implement it.
+
 Version 26.1 (2026-07-11)
 -------------------------
 

@@ -1,0 +1,138 @@
+==============================
+Advanced search condition trees
+==============================
+
+Ordinary query parameters are combined with ``AND`` and always apply the
+same lookup. When an admin interface needs to express richer logic — for
+example *"published and title contains a word, or author belongs to a given
+list"* — a ``FilterSet`` also accepts an optional **condition tree** via the
+``conditions`` argument.
+
+A condition tree is a nested mapping (or a JSON string) built from three
+group operators and one leaf form:
+
+* ``{"and": [<node>, ...]}`` — all children must match.
+* ``{"or": [<node>, ...]}`` — at least one child must match.
+* ``{"not": <node>}`` — the child must not match.
+* ``{"filter": "<name>", "value": <value>}`` — a leaf applying the filter
+  named ``<name>``, which **must be declared on the filterset**.
+
+Example
+-------
+
+.. code-block:: python
+
+    # models.py
+    from django.db import models
+
+
+    class Author(models.Model):
+        name = models.CharField(max_length=100)
+
+
+    class Book(models.Model):
+        title = models.CharField(max_length=100)
+        is_published = models.BooleanField(default=False)
+        author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+
+    # filters.py
+    from django_filters import FilterSet
+    from django_filters.filters import BaseInFilter, BooleanFilter, CharFilter
+
+    from .models import Book
+
+
+    class BookFilter(FilterSet):
+        is_published = BooleanFilter()
+        title = CharFilter(lookup_expr="icontains")
+        author_in = BaseInFilter(field_name="author_id")
+
+        class Meta:
+            model = Book
+            fields = []
+
+
+    # views.py
+    import json
+
+    from django.http import JsonResponse
+
+    from django_filters.exceptions import ConditionTreeError
+
+    from .filters import BookFilter
+    from .models import Book
+
+
+    def book_search(request):
+        try:
+            book_filter = BookFilter(
+                request.GET,  # ordinary parameters keep working as usual
+                queryset=Book.objects.all(),
+                conditions=request.GET.get("conditions"),
+            )
+        except ConditionTreeError as exc:
+            return JsonResponse({"error": exc.messages[0]}, status=400)
+        return JsonResponse({"count": book_filter.qs.count()})
+
+A request mixing an ordinary parameter with a condition tree for
+*"published and title contains 'django', or the author is id 3 or 7"*:
+
+.. code-block:: console
+
+    $ curl -g 'http://localhost:8000/books/?title=cook&conditions={
+        "or": [
+            {"and": [
+                {"filter": "is_published", "value": true},
+                {"filter": "title", "value": "django"}
+            ]},
+            {"filter": "author_in", "value": [3, 7]}
+        ]
+    }'
+
+Validation and errors
+---------------------
+
+The tree is validated and compiled when the filterset is instantiated, so
+invalid input is rejected **before any query is executed**:
+
+* Leaf values are cleaned through the corresponding filter's form field, so
+  user input is never interpolated into an ORM lookup directly.
+* Leaves may only reference filters declared on the filterset.
+* Errors raise :class:`django_filters.exceptions.ConditionTreeError`, whose
+  ``path`` attribute locates the offending node, e.g. ``("and", 0, "or",
+  1)`` rendered as ``and[0].or[1]`` in the message.
+* Nesting depth and total node count are limited by the
+  ``condition_tree_max_depth`` (default 8) and ``condition_tree_max_nodes``
+  (default 64) class attributes, which may be overridden per filterset.
+
+Compilation happens per filterset instance, so concurrent requests never
+share compiled state.
+
+Composable filters
+------------------
+
+Combining conditions requires each leaf to be expressible as a ``Q``
+object. The explicit interface for this is ``Filter.get_q(value)``, which
+the base ``Filter`` implements using its ``field_name``/``lookup_expr``
+(negated when ``exclude=True``).
+
+Filters using a custom ``method`` may return an arbitrary queryset, so they
+cannot be composed automatically and are rejected before the query runs.
+To make such a filter usable in condition trees, override ``get_q()`` with
+an equivalent ``Q``-based implementation:
+
+.. code-block:: python
+
+    from django.db.models import Q
+    from django_filters.filters import CharFilter
+
+
+    class UsernameFilter(CharFilter):
+        def get_q(self, value):
+            return Q(username__iexact=value)
+
+Filters declared with ``distinct=True`` mark the compiled tree so that the
+final queryset is de-duplicated with ``.distinct()``.
+
+Empty ``and`` groups match everything; empty ``or`` groups match nothing.

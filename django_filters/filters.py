@@ -13,6 +13,7 @@ from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import EMPTY_VALUES
+from .exceptions import FilterNotCombinable
 from .fields import (
     BaseCSVField,
     BaseRangeField,
@@ -166,6 +167,35 @@ class Filter:
         lookup = "%s__%s" % (self.field_name, self.lookup_expr)
         qs = self.get_method(qs)(**{lookup: value})
         return qs
+
+    def get_q(self, value):
+        """
+        Return a ``Q`` object implementing this filter for the cleaned
+        ``value``. This is the explicit composability interface used when a
+        filter appears as a leaf of a condition tree.
+
+        The default implementation builds a lookup from ``field_name`` and
+        ``lookup_expr``, negated when ``exclude=True``. Filters using a
+        custom ``method`` may return an arbitrary queryset, so they raise
+        ``FilterNotCombinable`` unless they override ``get_q()`` with an
+        equivalent ``Q``-based implementation.
+        """
+        if self.method is not None:
+            raise FilterNotCombinable(
+                "Filter '%s' uses a custom method and cannot be composed into "
+                "a condition tree. Override get_q() to opt in."
+                % (self.field_name or self.label)
+            )
+        if self.field_name is None:
+            raise FilterNotCombinable(
+                "Filter '%s' does not declare a field_name and cannot be "
+                "composed into a condition tree." % type(self).__name__
+            )
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+        q = Q(**{lookup: value})
+        if self.exclude:
+            q = ~q
+        return q
 
 
 class CharFilter(Filter):

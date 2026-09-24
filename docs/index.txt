@@ -13,6 +13,7 @@ do this.
 
     guide/install
     guide/usage
+    guide/conditions
     guide/rest_framework
     guide/tips
     guide/migration
