@@ -4,8 +4,10 @@ from itertools import chain
 from re import search, sub
 
 from django import forms
+from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields import BLANK_CHOICE_DASH
 from django.forms.utils import flatatt
+from django.http import QueryDict
 from django.utils.datastructures import MultiValueDict
 from django.utils.encoding import force_str
 from django.utils.http import urlencode
@@ -268,3 +270,24 @@ class QueryArrayWidget(BaseCSVWidget, forms.TextInput):
             ret = []
 
         return list(set(ret))
+
+
+class RelatedSetWidget(forms.Widget):
+    """
+    Pseudo-widget that extracts the subset of the parent form's data that
+    belongs to a ``RelatedSetFilter``, i.e. all keys prefixed with
+    ``<name>__``. The extracted data is returned as a new ``QueryDict`` with
+    the prefix stripped, suitable for binding a child ``FilterSet``.
+    """
+
+    def value_from_datadict(self, data, files, name):
+        prefix = name + LOOKUP_SEP
+        sub_data = QueryDict(mutable=True)
+        for key in data:
+            if key.startswith(prefix):
+                if hasattr(data, "getlist"):
+                    values = data.getlist(key)
+                else:
+                    values = [data[key]]
+                sub_data.setlist(key[len(prefix):], values)
+        return sub_data or None

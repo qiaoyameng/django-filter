@@ -8,6 +8,7 @@ from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import EMPTY_VALUES
+from .exceptions import RelatedSetValidationError
 from .utils import handle_timezone
 from .widgets import (
     BaseCSVWidget,
@@ -15,6 +16,7 @@ from .widgets import (
     DateRangeWidget,
     LookupChoiceWidget,
     RangeWidget,
+    RelatedSetWidget,
 )
 
 try:
@@ -322,3 +324,36 @@ class ModelMultipleChoiceField(ChoiceIteratorMixin, forms.ModelMultipleChoiceFie
         result = list(super()._check_values(value))
         result += [self.null_value] if null else []
         return result
+
+
+class RelatedSetField(forms.Field):
+    """
+    Form field backing a ``RelatedSetFilter``. Validates the extracted
+    sub-data against the child ``FilterSet`` and returns the validated
+    child filterset instance as its cleaned value.
+    """
+
+    widget = RelatedSetWidget
+
+    def __init__(self, filterset_class, **kwargs):
+        self.filterset_class = filterset_class
+        self.request = None
+        super().__init__(**kwargs)
+
+    def clean(self, value):
+        if value is None:
+            if self.required:
+                raise forms.ValidationError(
+                    self.error_messages["required"], code="required"
+                )
+            return None
+
+        filterset = self.filterset_class(data=value, request=self.request)
+        if not filterset.is_valid():
+            raise RelatedSetValidationError(filterset.errors)
+
+        # treat sub-data that yields no effective child filters as a noop
+        if all(v in EMPTY_VALUES for v in filterset.form.cleaned_data.values()):
+            return None
+
+        return filterset

@@ -24,6 +24,8 @@ from .filters import (
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
     NumberFilter,
+    RelatedSetFilter,
+    RelatedSetFormMixin,
     TimeFilter,
     UUIDFilter,
 )
@@ -262,7 +264,11 @@ class BaseFilterSet:
             [(name, filter_.field) for name, filter_ in self.filters.items()]
         )
 
-        return type(str("%sForm" % self.__class__.__name__), (self._meta.form,), fields)
+        bases = (self._meta.form,)
+        if any(isinstance(f, RelatedSetFilter) for f in self.filters.values()):
+            bases = (RelatedSetFormMixin,) + bases
+
+        return type(str("%sForm" % self.__class__.__name__), bases, fields)
 
     @property
     def form(self):

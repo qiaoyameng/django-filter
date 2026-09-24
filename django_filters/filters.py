@@ -5,7 +5,7 @@ from itertools import chain
 
 from django import forms
 from django.core.validators import MaxValueValidator
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.db.models.constants import LOOKUP_SEP
 from django.forms.utils import pretty_name
 from django.utils.timezone import now
@@ -13,6 +13,7 @@ from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import EMPTY_VALUES
+from .exceptions import RelatedSetValidationError
 from .fields import (
     BaseCSVField,
     BaseRangeField,
@@ -26,9 +27,10 @@ from .fields import (
     ModelMultipleChoiceField,
     MultipleChoiceField,
     RangeField,
+    RelatedSetField,
     TimeRangeField,
 )
-from .utils import get_model_field, label_for_filter
+from .utils import get_model_field, get_reverse_relation_path, label_for_filter
 
 try:
     from django.utils.choices import normalize_choices
@@ -64,6 +66,7 @@ __all__ = [
     "NumericRangeFilter",
     "OrderingFilter",
     "RangeFilter",
+    "RelatedSetFilter",
     "TimeFilter",
     "TimeRangeFilter",
     "TypedChoiceFilter",
@@ -816,6 +819,121 @@ class OrderingFilter(BaseCSVFilter, ChoiceFilter):
 
         # interleave the ascending and descending choices
         return [val for pair in zip(ascending, descending) for val in pair]
+
+
+class RelatedSetFormMixin:
+    """
+    Form mixin that expands ``RelatedSetValidationError``s raised by
+    ``RelatedSetField`` into individual errors keyed by
+    ``<filter name>__<child field name>``, preserving the location of each
+    invalid child field within the parent form's ``errors``.
+    """
+
+    def add_error(self, field, error):
+        if isinstance(error, RelatedSetValidationError):
+            if field in self.cleaned_data:
+                del self.cleaned_data[field]
+            for child_name, error_list in error.error_dict.items():
+                key = LOOKUP_SEP.join([field, child_name])
+                self._errors.setdefault(
+                    key, self.error_class(renderer=self.renderer)
+                ).extend(error_list)
+            return
+        super().add_error(field, error)
+
+
+class RelatedSetFilter(Filter):
+    """
+    Filter a queryset by applying a child ``FilterSet`` to a related
+    collection, using an ``EXISTS``-style correlated subquery. All child
+    conditions are matched against the *same* related record, and the outer
+    queryset is never joined against the relation, so results contain no
+    duplicates and related objects are never loaded into Python.
+
+    The ``quantifier`` controls how the child conditions are applied:
+
+    - ``RelatedSetFilter.ANY``: at least one related record matches.
+    - ``RelatedSetFilter.NONE``: no related record matches.
+    - ``RelatedSetFilter.ALL``: every related record matches. Vacuously true
+      for empty collections, unless ``require_non_empty=True`` is given.
+
+    The relation path (``field_name``) is configured server-side only and may
+    traverse reverse foreign keys and many-to-many relations. Request data
+    only ever feeds the child ``FilterSet``'s own fields, addressed as
+    ``<filter name>__<child field name>``.
+    """
+
+    field_class = RelatedSetField
+
+    ANY = "any"
+    NONE = "none"
+    ALL = "all"
+    QUANTIFIERS = (ANY, NONE, ALL)
+
+    def __init__(
+        self,
+        filterset_class,
+        field_name=None,
+        *,
+        quantifier=ANY,
+        require_non_empty=False,
+        **kwargs,
+    ):
+        if quantifier not in self.QUANTIFIERS:
+            raise ValueError(
+                "Invalid quantifier '%s'. Must be one of: %s."
+                % (quantifier, ", ".join(self.QUANTIFIERS))
+            )
+        self.filterset_class = filterset_class
+        self.quantifier = quantifier
+        self.require_non_empty = require_non_empty
+        kwargs["filterset_class"] = filterset_class
+        super().__init__(field_name=field_name, **kwargs)
+        # the lookup expression is meaningless for this filter
+        self.lookup_expr = None
+
+    @property
+    def field(self):
+        field = super().field
+        # propagate the request so the child FilterSet can make use of it
+        parent = getattr(self, "parent", None)
+        if parent is not None:
+            field.request = parent.request
+        return field
+
+    def get_related_queryset(self, qs, child_model):
+        """
+        Build the related model's queryset, correlated to the outer
+        queryset's model via the configured relation path.
+        """
+        reverse_path = get_reverse_relation_path(qs.model, self.field_name)
+        return child_model._default_manager.filter(**{reverse_path: OuterRef("pk")})
+
+    def filter(self, qs, value):
+        if value is None:
+            return qs
+
+        child = value
+        related = self.get_related_queryset(qs, child.queryset.model)
+
+        if self.quantifier == self.ALL:
+            # "all match" <=> "no related record violates the conditions".
+            # The satisfied set is evaluated uncorrelated so that the
+            # OuterRef correlation of the violators subquery still binds to
+            # the outer queryset.
+            satisfied = child.filter_queryset(
+                child.queryset.model._default_manager.all()
+            )
+            violators = related.exclude(pk__in=satisfied.values("pk"))
+            qs = qs.exclude(Exists(violators))
+            if self.require_non_empty:
+                qs = qs.filter(Exists(related))
+            return qs
+
+        matches = Exists(child.filter_queryset(related))
+        if self.quantifier == self.NONE:
+            return qs.exclude(matches)
+        return qs.filter(matches)
 
 
 class FilterMethod:

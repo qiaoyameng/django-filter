@@ -147,6 +147,32 @@ def get_model_field(model, field_name):
     return fields[-1] if fields else None
 
 
+def get_reverse_relation_path(model, relation_path):
+    """
+    Get the query path that leads from the model at the end of
+    ``relation_path`` back to ``model``. This is the inverse of
+    ``relation_path`` and is suitable for correlating a subquery on the
+    related model with the outer model, e.g.::
+
+        >>> get_reverse_relation_path(Order, 'items')
+        'order'
+        >>> OrderItem.objects.filter(order=OuterRef('pk'))
+
+    Works for forward and reverse foreign keys, one-to-one fields, and
+    many-to-many fields, as well as multi-hop ``__``-separated paths.
+    """
+    reverse_parts = []
+    for part in relation_path.split(LOOKUP_SEP):
+        field = model._meta.get_field(part)
+        if isinstance(field, ForeignObjectRel):
+            # reverse relation: the forward field lives on the related model
+            reverse_parts.append(field.field.name)
+        else:
+            reverse_parts.append(field.related_query_name())
+        model = field.related_model
+    return LOOKUP_SEP.join(reverse_parts)
+
+
 def get_field_parts(model, field_name):
     """
     Get the field parts that represent the traversable relationships from the

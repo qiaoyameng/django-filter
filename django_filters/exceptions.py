@@ -1,4 +1,4 @@
-from django.core.exceptions import FieldError
+from django.core.exceptions import FieldError, ValidationError
 
 
 class FieldLookupError(FieldError):
@@ -6,3 +6,10 @@ class FieldLookupError(FieldError):
         super().__init__(
             "Unsupported lookup '%s' for field '%s'." % (lookup_expr, model_field)
         )
+
+
+class RelatedSetValidationError(ValidationError):
+    """
+    Wraps a child ``FilterSet``'s error dict so that the parent form can
+    expand it into per-field errors, preserving each child field's location.
+    """

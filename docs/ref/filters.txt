@@ -722,6 +722,71 @@ Example::
     assert len(f.qs) == 3
 
 
+.. _related-set-filter:
+.. class:: RelatedSetFilter
+
+Filter a queryset by applying a child ``FilterSet`` to a related collection.
+The child conditions are evaluated with a correlated ``EXISTS`` subquery, so
+all conditions in a single request are matched against the *same* related
+record, the outer queryset is never joined against the relation (no duplicate
+results), and related objects are never loaded into Python.
+
+* ``filterset_class`` is the child ``FilterSet`` class reused to validate and
+  apply the conditions on the related model.
+
+* ``field_name`` is the relation path on the outer model. It is configured
+  server-side only and may traverse reverse foreign keys and many-to-many
+  relations. Request data only ever feeds the child ``FilterSet``'s fields,
+  addressed as ``<filter name>__<child field name>``.
+
+* ``quantifier`` controls how the child conditions are applied:
+
+  - ``RelatedSetFilter.ANY`` (default): at least one related record matches.
+  - ``RelatedSetFilter.NONE``: no related record matches.
+  - ``RelatedSetFilter.ALL``: every related record matches. This is
+    vacuously true for empty collections unless ``require_non_empty=True``
+    is given.
+
+* ``require_non_empty`` is an optional argument (default ``False``) used
+  with the ``ALL`` quantifier to additionally require the related collection
+  to contain at least one record.
+
+Errors raised by the child ``FilterSet`` are reported on the parent form
+under ``<filter name>__<child field name>`` keys, preserving the location of
+the invalid field.
+
+Example::
+
+    class OrderItemFilter(FilterSet):
+        class Meta:
+            model = OrderItem
+            fields = {"status": ["exact"], "quantity": ["gte"]}
+
+    class OrderFilter(FilterSet):
+        any_backordered = RelatedSetFilter(
+            OrderItemFilter, field_name="items", quantifier="any"
+        )
+        none_backordered = RelatedSetFilter(
+            OrderItemFilter, field_name="items", quantifier="none"
+        )
+        all_shipped = RelatedSetFilter(
+            OrderItemFilter,
+            field_name="items",
+            quantifier="all",
+            require_non_empty=True,
+        )
+
+        class Meta:
+            model = Order
+            fields = []
+
+    # Orders with at least one backordered item.
+    f = OrderFilter({"any_backordered__status": "backordered"})
+
+    # Orders where every item is shipped (and has at least one item).
+    f = OrderFilter({"all_shipped__status": "shipped"})
+
+
 .. _ordering-filter:
 .. class:: OrderingFilter
 
