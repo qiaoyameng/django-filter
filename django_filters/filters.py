@@ -85,6 +85,8 @@ class Filter:
         method=None,
         distinct=False,
         exclude=False,
+        depends_on=None,
+        on_missing_dependency="skip",
         **kwargs
     ):
         if lookup_expr is None:
@@ -95,6 +97,13 @@ class Filter:
         self.method = method
         self.distinct = distinct
         self.exclude = exclude
+        self.depends_on = tuple(depends_on or ())
+        if on_missing_dependency not in ("skip", "raise"):
+            raise ValueError(
+                "Invalid on_missing_dependency: %r. "
+                "Expected 'skip' or 'raise'." % on_missing_dependency
+            )
+        self.on_missing_dependency = on_missing_dependency
 
         self.extra = kwargs
         self.extra.setdefault("required", False)

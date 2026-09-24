@@ -10,7 +10,8 @@ from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOn
 from django.http import QueryDict
 
 from .conf import settings
-from .constants import ALL_FIELDS
+from .constants import ALL_FIELDS, EMPTY_VALUES
+from .exceptions import FilterDependencyError
 from .filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -51,6 +52,90 @@ class UnknownFieldBehavior(Enum):
     IGNORE = "ignore"
 
 
+def resolve_filter_order(filters, class_name=None):
+    """
+    Validate the ``depends_on`` declarations of the given filters and return
+    the filter names in a dependency-safe execution order.
+
+    Filters that do not declare dependencies keep their original (declaration)
+    order, and where several orderings are valid the declaration order is
+    preserved. Raises ``FilterDependencyError`` for unknown names,
+    self-dependencies and dependency cycles.
+    """
+    names = list(filters)
+    where = " on %s" % class_name if class_name else ""
+
+    for name in names:
+        for dep in filters[name].depends_on:
+            if dep == name:
+                raise FilterDependencyError(
+                    "Filter '%s' cannot depend on itself%s." % (name, where)
+                )
+            if dep not in filters:
+                raise FilterDependencyError(
+                    "Filter '%s' depends on unknown filter '%s'%s."
+                    % (name, dep, where)
+                )
+
+    # Stable topological sort (Kahn's algorithm): nodes become ready in
+    # declaration order, so valid orderings preserve declaration order.
+    indegree = {name: 0 for name in names}
+    dependents = {name: [] for name in names}
+    for name in names:
+        for dep in filters[name].depends_on:
+            indegree[name] += 1
+            dependents[dep].append(name)
+
+    queue = [name for name in names if indegree[name] == 0]
+    order = []
+    while queue:
+        name = queue.pop(0)
+        order.append(name)
+        for dependent in dependents[name]:
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                queue.append(dependent)
+
+    if len(order) != len(names):
+        cycle = _find_dependency_cycle(filters, names)
+        raise FilterDependencyError(
+            "Circular filter dependency detected%s: %s."
+            % (where, " -> ".join(cycle))
+        )
+
+    return order
+
+
+def _find_dependency_cycle(filters, names):
+    """Return a list of filter names forming a dependency cycle."""
+    unvisited, visiting, visited = 0, 1, 2
+    state = {name: unvisited for name in names}
+    stack = []
+
+    def visit(name):
+        state[name] = visiting
+        stack.append(name)
+        for dep in filters[name].depends_on:
+            if dep not in filters:
+                continue
+            if state[dep] == visiting:
+                return stack[stack.index(dep) :] + [dep]
+            if state[dep] == unvisited:
+                cycle = visit(dep)
+                if cycle:
+                    return cycle
+        stack.pop()
+        state[name] = visited
+        return None
+
+    for name in names:
+        if state[name] == unvisited:
+            cycle = visit(name)
+            if cycle:
+                return cycle
+    return names
+
+
 class FilterSetOptions:
     def __init__(self, options=None):
         self.model = getattr(options, "model", None)
@@ -80,6 +165,9 @@ class FilterSetMetaclass(type):
         new_class = super().__new__(cls, name, bases, attrs)
         new_class._meta = FilterSetOptions(getattr(new_class, "Meta", None))
         new_class.base_filters = new_class.get_filters()
+        new_class._filter_order = resolve_filter_order(
+            new_class.base_filters, name
+        )
 
         return new_class
 
@@ -229,8 +317,27 @@ class BaseFilterSet:
         This method should be overridden if additional filtering needs to be
         applied to the queryset before it is cached.
         """
-        for name, value in self.form.cleaned_data.items():
-            queryset = self.filters[name].filter(queryset, value)
+        cleaned_data = self.form.cleaned_data
+        # Names of filters that ran with a usable (non-empty) value. Filters
+        # declaring `depends_on` only run once all of their dependencies did.
+        executed = set()
+        for name in self._filter_order:
+            filter_ = self.filters[name]
+            missing = [dep for dep in filter_.depends_on if dep not in executed]
+            if missing:
+                if filter_.on_missing_dependency == "raise":
+                    raise FilterDependencyError(
+                        "Filter '%s' cannot be applied: its dependencies did "
+                        "not provide a usable value: %s."
+                        % (name, ", ".join("'%s'" % dep for dep in missing))
+                    )
+                continue
+            if name not in cleaned_data:
+                # The field failed to clean (or the form is invalid), so the
+                # filter has no usable value and must not run.
+                continue
+            value = cleaned_data[name]
+            queryset = filter_.filter(queryset, value)
             assert isinstance(
                 queryset, models.QuerySet
             ), "Expected '%s.%s' to return a QuerySet, but got a %s instead." % (
@@ -238,6 +345,8 @@ class BaseFilterSet:
                 name,
                 type(queryset).__name__,
             )
+            if value not in EMPTY_VALUES:
+                executed.add(name)
         return queryset
 
     @property

@@ -112,6 +112,32 @@ span relationships. Defaults to ``False``.
 A boolean that specifies whether the Filter should use ``filter`` or ``exclude``
 on the queryset. Defaults to ``False``.
 
+``depends_on``
+~~~~~~~~~~~~~~
+
+An optional list of filter names that must run before this filter. The
+``FilterSet`` executes filters in dependency order, so a filter may safely
+read context computed by its prerequisites (e.g. values stored on the
+filterset instance by a custom ``method``). Dependencies are validated when
+the ``FilterSet`` class is created: unknown names, self-dependencies and
+cycles raise a ``FilterDependencyError``. Filters that do not declare
+dependencies keep their declaration order, and declaration order is preserved
+whenever several orderings are valid.
+
+If a prerequisite was not provided a value (or its value failed to clean),
+the dependent filter does not run. The ``on_missing_dependency`` option
+controls this behavior.
+
+``on_missing_dependency``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Controls what happens when a filter's ``depends_on`` prerequisites did not
+provide a usable value. Must be one of:
+
+* ``'skip'`` (default): the dependent filter is silently skipped, so it never
+  receives an empty or invalid context.
+* ``'raise'``: a ``FilterDependencyError`` is raised instead.
+
 ``required``
 ~~~~~~~~~~~~
 

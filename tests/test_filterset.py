@@ -6,7 +6,7 @@ from django.db import models
 from django.test import TestCase, override_settings
 from django.utils.datastructures import MultiValueDict
 
-from django_filters.exceptions import FieldLookupError
+from django_filters.exceptions import FieldLookupError, FilterDependencyError
 from django_filters.filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -1099,3 +1099,279 @@ class MiscFilterSetTests(TestCase):
         # The FilterSet should not proxy .qs methods - just access .qs directly
         self.assertFalse(hasattr(FilterSet, "__len__"))
         self.assertFalse(hasattr(FilterSet, "__iter__"))
+
+
+class FilterDependencyTests(TestCase):
+    def make_filterset(self, calls, **filter_kwargs):
+        """
+        Build a FilterSet recording filter execution order in ``calls``.
+        ``filter_kwargs`` maps filter names to Filter kwargs.
+        """
+        attrs = {}
+        for name, kwargs in filter_kwargs.items():
+            attrs[name] = CharFilter(method="record", **kwargs)
+
+        def record(self, qs, field_name, value):
+            calls.append(field_name)
+            return qs
+
+        attrs["record"] = record
+        attrs["Meta"] = type("Meta", (), {"model": User, "fields": []})
+        return type("F", (FilterSet,), attrs)
+
+    def test_executes_in_dependency_order(self):
+        calls = []
+        F = self.make_filterset(
+            calls,
+            available={"depends_on": ["region"]},
+            region={},
+        )
+        f = F({"region": "east", "available": "1"}, queryset=User.objects.all())
+        f.qs
+        self.assertEqual(calls, ["region", "available"])
+
+    def test_declaration_order_preserved_without_dependencies(self):
+        calls = []
+        F = self.make_filterset(calls, first={}, second={}, third={})
+        f = F(
+            {"first": "1", "second": "2", "third": "3"},
+            queryset=User.objects.all(),
+        )
+        f.qs
+        self.assertEqual(calls, ["first", "second", "third"])
+
+    def test_declaration_order_preserved_for_ambiguous_orderings(self):
+        # 'available' only forces 'region' earlier; 'other' keeps its place.
+        calls = []
+        F = self.make_filterset(
+            calls,
+            available={"depends_on": ["region"]},
+            other={},
+            region={},
+        )
+        f = F(
+            {"available": "1", "other": "2", "region": "3"},
+            queryset=User.objects.all(),
+        )
+        f.qs
+        self.assertEqual(calls, ["other", "region", "available"])
+
+    def test_diamond_dependency(self):
+        calls = []
+        F = self.make_filterset(
+            calls,
+            available={"depends_on": ["city", "stock"]},
+            city={"depends_on": ["region"]},
+            stock={"depends_on": ["region"]},
+            region={},
+        )
+        f = F(
+            {"available": "1", "city": "2", "stock": "3", "region": "4"},
+            queryset=User.objects.all(),
+        )
+        f.qs
+        self.assertEqual(calls, ["region", "city", "stock", "available"])
+
+    def test_unknown_dependency_raises_at_class_creation(self):
+        with self.assertRaisesMessage(
+            FilterDependencyError,
+            "Filter 'available' depends on unknown filter 'region'",
+        ):
+            self.make_filterset([], available={"depends_on": ["region"]})
+
+    def test_self_dependency_raises_at_class_creation(self):
+        with self.assertRaisesMessage(
+            FilterDependencyError, "Filter 'region' cannot depend on itself"
+        ):
+            self.make_filterset([], region={"depends_on": ["region"]})
+
+    def test_direct_cycle_raises_at_class_creation(self):
+        with self.assertRaisesMessage(
+            FilterDependencyError,
+            "Circular filter dependency detected",
+        ) as cm:
+            self.make_filterset(
+                [], a={"depends_on": ["b"]}, b={"depends_on": ["a"]}
+            )
+        self.assertIn("a -> b -> a", str(cm.exception))
+
+    def test_indirect_cycle_raises_at_class_creation(self):
+        with self.assertRaisesMessage(
+            FilterDependencyError, "a -> b -> c -> a"
+        ):
+            self.make_filterset(
+                [],
+                a={"depends_on": ["b"]},
+                b={"depends_on": ["c"]},
+                c={"depends_on": ["a"]},
+            )
+
+    def test_multilevel_inheritance_override(self):
+        calls = []
+
+        class Base(FilterSet):
+            region = CharFilter(method="filter_region")
+
+            class Meta:
+                model = User
+                fields = []
+
+            def filter_region(self, qs, field_name, value):
+                calls.append(("base", value))
+                self.region_context = value
+                return qs
+
+        class Middle(Base):
+            available = CharFilter(
+                method="filter_available", depends_on=["region"]
+            )
+
+            def filter_available(self, qs, field_name, value):
+                calls.append(("available", self.region_context))
+                return qs
+
+        class Final(Middle):
+            region = CharFilter(method="filter_region_v2")
+
+            def filter_region_v2(self, qs, field_name, value):
+                calls.append(("v2", value))
+                self.region_context = value.upper()
+                return qs
+
+        f = Final(
+            {"region": "east", "available": "1"}, queryset=User.objects.all()
+        )
+        f.qs
+        self.assertEqual(calls, [("v2", "east"), ("available", "EAST")])
+
+    def test_inherited_dependencies_validated_against_final_filters(self):
+        # The subclass removes the filter its parent depends on: the
+        # dependency must be reported when the subclass is created.
+        class Base(FilterSet):
+            region = CharFilter()
+            available = CharFilter(depends_on=["region"])
+
+            class Meta:
+                model = User
+                fields = []
+
+        with self.assertRaisesMessage(
+            FilterDependencyError,
+            "Filter 'available' depends on unknown filter 'region'",
+        ):
+            type("Sub", (Base,), {"region": None, "Meta": Base.Meta})
+
+    def test_missing_dependency_value_skips_dependent(self):
+        calls = []
+        F = self.make_filterset(
+            calls, region={}, available={"depends_on": ["region"]}
+        )
+        # 'region' not provided: 'available' must not run with empty context.
+        f = F({"available": "1"}, queryset=User.objects.all())
+        f.qs
+        self.assertEqual(calls, [])
+
+    def test_invalid_dependency_value_skips_dependent(self):
+        calls = []
+
+        class F(FilterSet):
+            region = NumberFilter(method="record")
+            available = CharFilter(method="record", depends_on=["region"])
+
+            class Meta:
+                model = User
+                fields = []
+
+            def record(self, qs, field_name, value):
+                calls.append(field_name)
+                return qs
+
+        # 'region' fails to clean: 'available' must not run.
+        f = F({"region": "not-a-number", "available": "1"},
+              queryset=User.objects.all())
+        f.qs
+        self.assertFalse(f.is_valid())
+        self.assertEqual(calls, [])
+
+    def test_missing_dependency_value_can_raise(self):
+        calls = []
+        F = self.make_filterset(
+            calls,
+            region={},
+            available={
+                "depends_on": ["region"],
+                "on_missing_dependency": "raise",
+            },
+        )
+        f = F({"available": "1"}, queryset=User.objects.all())
+        with self.assertRaisesMessage(
+            FilterDependencyError,
+            "Filter 'available' cannot be applied",
+        ):
+            f.qs
+        self.assertEqual(calls, [])
+
+    def test_invalid_on_missing_dependency_rejected(self):
+        with self.assertRaisesMessage(
+            ValueError, "Invalid on_missing_dependency"
+        ):
+            CharFilter(on_missing_dependency="explode")
+
+    def test_each_filter_runs_once_per_evaluation(self):
+        calls = []
+        F = self.make_filterset(
+            calls, region={}, available={"depends_on": ["region"]}
+        )
+        f = F({"region": "east", "available": "1"}, queryset=User.objects.all())
+        f.qs
+        f.qs
+        self.assertEqual(calls, ["region", "available"])
+
+    def test_parallel_instances_do_not_share_state(self):
+        calls = []
+
+        class F(FilterSet):
+            region = CharFilter(method="filter_region")
+            available = CharFilter(
+                method="filter_available", depends_on=["region"]
+            )
+
+            class Meta:
+                model = User
+                fields = []
+
+            def filter_region(self, qs, field_name, value):
+                self.region_context = value
+                calls.append((id(self), "region", value))
+                return qs
+
+            def filter_available(self, qs, field_name, value):
+                calls.append((id(self), "available", self.region_context))
+                return qs
+
+        east = F({"region": "east", "available": "1"},
+                 queryset=User.objects.all())
+        west = F({"region": "west", "available": "1"},
+                 queryset=User.objects.all())
+        # Interleave evaluation of both instances.
+        east.qs
+        west.qs
+        east.qs
+        west.qs
+        self.assertEqual(
+            calls,
+            [
+                (id(east), "region", "east"),
+                (id(east), "available", "east"),
+                (id(west), "region", "west"),
+                (id(west), "available", "west"),
+            ],
+        )
+
+    def test_legacy_filterset_without_dependencies_unchanged(self):
+        calls = []
+        F = self.make_filterset(calls, username={}, status={})
+        f = F({"username": "bob", "status": "1"}, queryset=User.objects.all())
+        f.qs
+        f.qs
+        self.assertEqual(calls, ["username", "status"])
