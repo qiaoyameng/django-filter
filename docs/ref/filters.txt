@@ -722,6 +722,71 @@ Example::
     assert len(f.qs) == 3
 
 
+.. _related-set-filter:
+.. class:: RelatedSetFilter
+
+Filter a queryset by a quantified condition over a set of related objects,
+reusing a child ``FilterSet`` to describe the condition. This avoids
+hand-writing ``Exists`` subqueries for every endpoint that needs "at least
+one", "none", or "all" semantics over a relationship.
+
+* ``filterset_class`` is a positional argument with the child ``FilterSet``
+  class used to validate and apply the condition on the related model.
+
+* ``field_name`` is the relationship path on the filtered model (reverse
+  foreign keys and many-to-many relations are supported). It is configured
+  server-side only and cannot be influenced by request data.
+
+* ``quantifier`` selects the matching semantics:
+
+  - ``"any"`` (default): at least one related object matches the condition.
+  - ``"none"``: no related object matches the condition.
+  - ``"all"``: every related object matches the condition. This is vacuously
+    true for objects without any related objects, unless
+    ``require_non_empty=True`` is passed.
+
+The child filterset's data is namespaced under the filter's attribute name,
+e.g. ``?items__out_of_stock=true``. All child conditions are applied to the
+*same* related record inside a single correlated subquery, so filtering
+never loads related objects into Python and never duplicates rows of the
+outer queryset. Child validation errors keep their field positions: they are
+prefixed with the child field name in the parent form's errors, and are
+available keyed by child field name via the filter's ``child_errors``
+property.
+
+Example::
+
+    class OrderItemFilterSet(FilterSet):
+        class Meta:
+            model = OrderItem
+            fields = {
+                "out_of_stock": ["exact"],
+                "shipped": ["exact"],
+                "quantity": ["gte"],
+            }
+
+    class OrderFilterSet(FilterSet):
+        any_out_of_stock = RelatedSetFilter(
+            OrderItemFilterSet, field_name="items", quantifier="any"
+        )
+        none_out_of_stock = RelatedSetFilter(
+            OrderItemFilterSet, field_name="items", quantifier="none"
+        )
+        all_shipped = RelatedSetFilter(
+            OrderItemFilterSet, field_name="items", quantifier="all",
+            require_non_empty=True,
+        )
+
+        class Meta:
+            model = Order
+            fields = []
+
+    # Orders where a single item is both out of stock and quantity >= 5:
+    f = OrderFilterSet({
+        "any_out_of_stock__out_of_stock": "true",
+        "any_out_of_stock__quantity__gte": "5",
+    })
+
 .. _ordering-filter:
 .. class:: OrderingFilter
 

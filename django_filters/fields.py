@@ -15,6 +15,7 @@ from .widgets import (
     DateRangeWidget,
     LookupChoiceWidget,
     RangeWidget,
+    RelatedSetWidget,
 )
 
 try:
@@ -322,3 +323,41 @@ class ModelMultipleChoiceField(ChoiceIteratorMixin, forms.ModelMultipleChoiceFie
         result = list(super()._check_values(value))
         result += [self.null_value] if null else []
         return result
+
+
+class RelatedSetField(forms.Field):
+    """
+    Form field backing ``RelatedSetFilter``. Receives the child filterset's
+    data extracted by ``RelatedSetWidget`` and validates it by binding the
+    child ``FilterSet``. The validated child filterset is returned as the
+    cleaned value, so that the filter can build its (un-evaluated) queryset.
+
+    Child validation errors keep their field positions: they are re-raised
+    prefixed with the child field name, and the bound child filterset remains
+    available as ``child_filterset`` for structured access to its errors.
+    """
+
+    widget = RelatedSetWidget
+
+    def __init__(self, filterset_class, **kwargs):
+        self.filterset_class = filterset_class
+        self.child_filterset = None
+        super().__init__(**kwargs)
+
+    def clean(self, value):
+        value = super().clean(value)
+        if value in EMPTY_VALUES:
+            return None
+
+        filterset = self.filterset_class(data=value)
+        self.child_filterset = filterset
+
+        if not filterset.is_valid():
+            raise forms.ValidationError(
+                [
+                    "%s: %s" % (field_name, error)
+                    for field_name, errors in filterset.errors.items()
+                    for error in errors
+                ]
+            )
+        return filterset

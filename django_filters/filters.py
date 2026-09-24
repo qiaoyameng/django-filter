@@ -4,9 +4,11 @@ from datetime import timedelta
 from itertools import chain
 
 from django import forms
+from django.core.exceptions import ImproperlyConfigured
 from django.core.validators import MaxValueValidator
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.fields.related import ForeignObjectRel
 from django.forms.utils import pretty_name
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
@@ -26,6 +28,7 @@ from .fields import (
     ModelMultipleChoiceField,
     MultipleChoiceField,
     RangeField,
+    RelatedSetField,
     TimeRangeField,
 )
 from .utils import get_model_field, label_for_filter
@@ -64,6 +67,7 @@ __all__ = [
     "NumericRangeFilter",
     "OrderingFilter",
     "RangeFilter",
+    "RelatedSetFilter",
     "TimeFilter",
     "TimeRangeFilter",
     "TypedChoiceFilter",
@@ -712,6 +716,132 @@ class LookupChoiceFilter(Filter):
 
         self.lookup_expr = lookup.lookup_expr
         return super().filter(qs, lookup.value)
+
+
+def _related_model_and_back_path(model, field_name):
+    """
+    Resolve a relationship ``field_name`` on ``model`` into the related model
+    and the lookup path that traverses from the related model back to
+    ``model``. The back path is used to correlate a subquery on the related
+    model with the outer query via ``OuterRef``.
+    """
+    back_names = []
+    current = model
+    for part in field_name.split(LOOKUP_SEP):
+        field = current._meta.get_field(part)
+        if isinstance(field, ForeignObjectRel):
+            # Reverse relation: the concrete field lives on the related model.
+            concrete = field.field
+            if concrete.many_to_many:
+                back_names.append(concrete.related_query_name())
+            else:
+                back_names.append(concrete.name)
+        else:
+            back_names.append(field.related_query_name())
+        current = field.related_model
+    return current, LOOKUP_SEP.join(reversed(back_names))
+
+
+class RelatedSetFilter(Filter):
+    """
+    Filter a queryset by a quantified condition over a set of related objects,
+    reusing a child ``FilterSet`` to describe the condition.
+
+    The child filterset's data is namespaced under the filter's name, e.g.
+    ``?items__out_of_stock=true``. All child conditions are applied to the
+    *same* related record inside a single correlated subquery, so filtering
+    never needs to load related objects into Python and never duplicates
+    rows of the outer queryset.
+
+    The ``quantifier`` argument selects the matching semantics:
+
+    * ``"any"``: at least one related object matches the child conditions.
+    * ``"none"``: no related object matches the child conditions.
+    * ``"all"``: every related object matches the child conditions. This is
+      vacuously true for objects without any related objects, unless
+      ``require_non_empty=True`` is given.
+
+    The relationship path (``field_name``) is configured server-side only;
+    reverse foreign keys and many-to-many relations are supported.
+    """
+
+    field_class = RelatedSetField
+
+    ANY = "any"
+    NONE = "none"
+    ALL = "all"
+    QUANTIFIERS = (ANY, NONE, ALL)
+
+    def __init__(
+        self,
+        filterset_class,
+        field_name=None,
+        *,
+        quantifier=ANY,
+        require_non_empty=False,
+        **kwargs
+    ):
+        if quantifier not in self.QUANTIFIERS:
+            raise ValueError(
+                "Invalid quantifier: %r. Must be one of %s."
+                % (quantifier, ", ".join(self.QUANTIFIERS))
+            )
+        self.filterset_class = filterset_class
+        self.quantifier = quantifier
+        self.require_non_empty = require_non_empty
+        kwargs["filterset_class"] = filterset_class
+        super().__init__(field_name, **kwargs)
+
+    @property
+    def child_errors(self):
+        """
+        The child filterset's errors, keyed by child field name, or ``None``
+        if the child filterset was not bound during validation.
+        """
+        parent = getattr(self, "parent", None)
+        if parent is None:
+            return None
+        # The parent form deepcopies its fields, so the bound child
+        # filterset lives on the form's copy of the field.
+        name = next(
+            (name for name, f in parent.filters.items() if f is self), None
+        )
+        if name is None:
+            return None
+        child = getattr(parent.form.fields.get(name), "child_filterset", None)
+        return child.errors if child is not None else None
+
+    def filter(self, qs, value):
+        if value is None:
+            return qs
+
+        related_model, back_path = _related_model_and_back_path(
+            qs.model, self.field_name
+        )
+        child_model = value._meta.model or value.queryset.model
+        if child_model is not related_model:
+            raise ImproperlyConfigured(
+                "%r filters the %r relation of %r, but its child filterset "
+                "is bound to %r."
+                % (self, self.field_name, qs.model, child_model)
+            )
+
+        matching = value.qs.filter(**{back_path: OuterRef("pk")})
+
+        if self.quantifier == self.ANY:
+            return qs.filter(Exists(matching))
+        if self.quantifier == self.NONE:
+            return qs.filter(~Exists(matching))
+
+        # "all": no related object may fall outside the matching set.
+        all_related = related_model._default_manager.filter(
+            **{back_path: OuterRef("pk")}
+        )
+        non_matching = all_related.exclude(pk__in=value.qs)
+        conditions = [~Exists(non_matching)]
+        if self.require_non_empty:
+            conditions.append(Exists(all_related))
+        return qs.filter(*conditions)
 
 
 class OrderingFilter(BaseCSVFilter, ChoiceFilter):

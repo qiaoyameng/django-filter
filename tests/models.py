@@ -210,3 +210,30 @@ class SpacewalkRecord(models.Model):
 
     astronaut = models.CharField(max_length=100)
     duration = models.DurationField()
+
+
+class Tag(models.Model):
+    name = models.CharField(max_length=32)
+
+    def __str__(self):
+        return self.name
+
+
+class Order(models.Model):
+    reference = models.CharField(max_length=32)
+    tags = models.ManyToManyField(Tag, related_name="orders", blank=True)
+
+    def __str__(self):
+        return self.reference
+
+
+class OrderItem(models.Model):
+    order = models.ForeignKey(Order, related_name="items", on_delete=models.CASCADE)
+    sku = models.CharField(max_length=32)
+    quantity = models.IntegerField(default=1)
+    out_of_stock = models.BooleanField(default=False)
+    shipped = models.BooleanField(default=False)
+    note = models.CharField(max_length=64, null=True, blank=True)
+
+    def __str__(self):
+        return "%s x%s" % (self.sku, self.quantity)

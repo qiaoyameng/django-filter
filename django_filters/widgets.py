@@ -4,7 +4,9 @@ from itertools import chain
 from re import search, sub
 
 from django import forms
+from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields import BLANK_CHOICE_DASH
+from django.http import QueryDict
 from django.forms.utils import flatatt
 from django.utils.datastructures import MultiValueDict
 from django.utils.encoding import force_str
@@ -268,3 +270,40 @@ class QueryArrayWidget(BaseCSVWidget, forms.TextInput):
             ret = []
 
         return list(set(ret))
+
+
+class RelatedSetWidget(forms.TextInput):
+    """
+    Widget for ``RelatedSetFilter`` that collects the child filterset's data.
+
+    Child filter values are expected to be namespaced under the filter's name
+    using the lookup separator, e.g. ``?items__out_of_stock=true``. The
+    matching keys are extracted into a ``QueryDict`` suitable for binding a
+    child ``FilterSet``. Returns ``None`` when no child data was provided, so
+    that the filter is simply skipped.
+    """
+
+    def value_from_datadict(self, data, files, name):
+        prefix = name + LOOKUP_SEP
+
+        if hasattr(data, "getlist"):
+            pairs = [
+                (key[len(prefix):], value)
+                for key in data
+                if key.startswith(prefix)
+                for value in data.getlist(key)
+            ]
+        else:
+            pairs = [
+                (key[len(prefix):], value)
+                for key, value in data.items()
+                if key.startswith(prefix)
+            ]
+
+        if not pairs:
+            return None
+
+        query_dict = QueryDict(mutable=True)
+        for key, value in pairs:
+            query_dict.appendlist(key, value)
+        return query_dict
