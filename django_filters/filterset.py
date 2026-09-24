@@ -10,7 +10,9 @@ from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOn
 from django.http import QueryDict
 
 from .conf import settings
+from .condition_tree import ConditionTreeCompiler
 from .constants import ALL_FIELDS
+from .exceptions import ConditionTreeError
 from .filters import (
     BaseInFilter,
     BaseRangeFilter,
@@ -190,13 +192,20 @@ FILTER_FOR_DBFIELD_DEFAULTS = {
 class BaseFilterSet:
     FILTER_DEFAULTS = FILTER_FOR_DBFIELD_DEFAULTS
 
-    def __init__(self, data=None, queryset=None, *, request=None, prefix=None):
+    #: Limits applied to condition trees passed via ``condition_tree=``.
+    condition_tree_max_depth = 5
+    condition_tree_max_nodes = 50
+
+    def __init__(
+        self, data=None, queryset=None, *, condition_tree=None, request=None, prefix=None
+    ):
         if queryset is None:
             queryset = self._meta.model._default_manager.all()
         model = queryset.model
 
-        self.is_bound = data is not None
+        self.is_bound = data is not None or condition_tree is not None
         self.data = data or QueryDict()
+        self.condition_tree = condition_tree
         self.queryset = queryset
         self.request = request
         self.form_prefix = prefix
@@ -210,9 +219,14 @@ class BaseFilterSet:
 
     def is_valid(self):
         """
-        Return True if the underlying form has no errors, or False otherwise.
+        Return True if the underlying form and the condition tree have no
+        errors, or False otherwise.
         """
-        return self.is_bound and self.form.is_valid()
+        return (
+            self.is_bound
+            and self.form.is_valid()
+            and not self.condition_tree_errors
+        )
 
     @property
     def errors(self):
@@ -238,7 +252,42 @@ class BaseFilterSet:
                 name,
                 type(queryset).__name__,
             )
+        if self.condition_tree is not None and not self.condition_tree_errors:
+            condition = self._compiled_condition
+            if condition is not None:
+                queryset = queryset.filter(condition)
+            if self._condition_tree_distinct:
+                queryset = queryset.distinct()
         return queryset
+
+    @property
+    def condition_tree_errors(self):
+        """
+        A list of ``(path, message)`` tuples describing errors found while
+        validating the condition tree, e.g. ``('$.or[0].value', '...')``.
+        Empty when the tree is valid or no tree was provided.
+        """
+        self._compile_condition_tree()
+        return self._condition_tree_errors
+
+    def _compile_condition_tree(self):
+        if hasattr(self, "_compiled_condition"):
+            return
+        self._compiled_condition = None
+        self._condition_tree_distinct = False
+        self._condition_tree_errors = []
+        if self.condition_tree is None:
+            return
+        compiler = ConditionTreeCompiler(
+            self.filters,
+            max_depth=self.condition_tree_max_depth,
+            max_nodes=self.condition_tree_max_nodes,
+        )
+        try:
+            self._compiled_condition = compiler.compile(self.condition_tree)
+            self._condition_tree_distinct = compiler.distinct
+        except ConditionTreeError as exc:
+            self._condition_tree_errors = exc.errors
 
     @property
     def qs(self):

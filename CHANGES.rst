@@ -1,3 +1,15 @@
+Unreleased
+----------
+
+* Added condition trees: a ``FilterSet`` now accepts an optional
+  ``condition_tree`` of ``and``/``or``/``not`` nodes whose leaves reference
+  declared filters, alongside the regular query parameters. See the
+  "Condition trees" guide.
+
+  Filters that cannot be expressed as a ``Q`` object (e.g. ``method=``
+  filters) are rejected before the query runs; custom filters can opt in by
+  implementing ``Filter.get_q()``.
+
 Version 26.1 (2026-07-11)
 -------------------------
 

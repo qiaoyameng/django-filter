@@ -13,6 +13,7 @@ from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import EMPTY_VALUES
+from .exceptions import NotComposableFilterError
 from .fields import (
     BaseCSVField,
     BaseRangeField,
@@ -75,6 +76,11 @@ __all__ = [
 class Filter:
     creation_counter = 0
     field_class = forms.Field
+
+    #: Whether this filter may be used as a leaf in a condition tree.
+    #: Filters whose ``filter()`` behavior cannot be expressed as a single
+    #: ``Q`` object should set this to ``False``.
+    composable = True
 
     def __init__(
         self,
@@ -167,6 +173,33 @@ class Filter:
         qs = self.get_method(qs)(**{lookup: value})
         return qs
 
+    def get_q(self, value):
+        """
+        Return a ``Q`` object equivalent to filtering with ``value``, or
+        ``None`` if the value should not constrain the query.
+
+        This is the composable interface used by condition trees. The
+        default implementation mirrors ``filter()`` for the standard
+        ``field_name__lookup_expr`` pattern. Raise
+        ``NotComposableFilterError`` if the filter cannot be expressed as
+        a ``Q`` object.
+        """
+        if self.method is not None:
+            raise NotComposableFilterError(
+                "Filter '%s' uses a custom method and cannot be used in a "
+                "condition tree. Define get_q() on a Filter subclass to make "
+                "it composable." % self.field_name
+            )
+        if not self.composable:
+            raise NotComposableFilterError(
+                "Filter '%s' (%s) cannot be expressed as a Q object and "
+                "cannot be used in a condition tree."
+                % (self.field_name, type(self).__name__)
+            )
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+        q = Q(**{lookup: value})
+        return ~q if self.exclude else q
+
 
 class CharFilter(Filter):
     field_class = forms.CharField
@@ -191,6 +224,11 @@ class ChoiceFilter(Filter):
             **{"%s__%s" % (self.field_name, self.lookup_expr): None}
         )
         return qs.distinct() if self.distinct else qs
+
+    def get_q(self, value):
+        if value == self.null_value:
+            value = None
+        return super().get_q(value)
 
 
 class TypedChoiceFilter(Filter):
@@ -282,6 +320,17 @@ class MultipleChoiceFilter(Filter):
         except (AttributeError, TypeError):
             return {name: v}
 
+    def get_q(self, value):
+        if not value:
+            return None
+        q = Q()
+        for v in set(value):
+            if v == self.null_value:
+                v = None
+            predicate = Q(**self.get_filter_predicate(v))
+            q = q & predicate if self.conjoined else q | predicate
+        return ~q if self.exclude else q
+
 
 class TypedMultipleChoiceFilter(MultipleChoiceFilter):
     field_class = forms.TypedMultipleChoiceField
@@ -307,6 +356,10 @@ class IsoDateTimeFilter(DateTimeFilter):
     """
 
     field_class = IsoDateTimeField
+
+    # The value is converted to an aware datetime in filter(); this cannot
+    # be reproduced by the standard get_q() implementation.
+    composable = False
 
 
 class TimeFilter(Filter):
@@ -418,6 +471,18 @@ class NumericRangeFilter(Filter):
 
         return super().filter(qs, value)
 
+    def get_q(self, value):
+        if value is None or (value.start is None and value.stop is None):
+            return None
+        if value.start is not None and value.stop is not None:
+            lookup = "%s__range" % self.field_name
+            q = Q(**{lookup: (value.start, value.stop)})
+        elif value.start is not None:
+            q = Q(**{"%s__startswith" % self.field_name: value.start})
+        else:
+            q = Q(**{"%s__endswith" % self.field_name: value.stop})
+        return ~q if self.exclude else q
+
 
 class RangeFilter(Filter):
     field_class = RangeField
@@ -436,12 +501,28 @@ class RangeFilter(Filter):
 
         return super().filter(qs, value)
 
+    def get_q(self, value):
+        if value is None or (value.start is None and value.stop is None):
+            return None
+        if value.start is not None and value.stop is not None:
+            lookup = "%s__range" % self.field_name
+            q = Q(**{lookup: (value.start, value.stop)})
+        elif value.start is not None:
+            q = Q(**{"%s__gte" % self.field_name: value.start})
+        else:
+            q = Q(**{"%s__lte" % self.field_name: value.stop})
+        return ~q if self.exclude else q
+
 
 def _truncate(dt):
     return dt.date()
 
 
 class DateRangeFilter(ChoiceFilter):
+    # Each choice maps to a different set of lookups; not expressible as a
+    # single Q object via the standard pattern.
+    composable = False
+
     choices = [
         ("today", _("Today")),
         ("yesterday", _("Yesterday")),
@@ -641,6 +722,10 @@ class LookupChoiceFilter(Filter):
     """
 
     field_class = forms.CharField
+
+    # The lookup expression is part of the submitted value; condition tree
+    # leaves must not carry user-supplied lookups.
+    composable = False
     outer_class = LookupChoiceField
 
     def __init__(
@@ -740,6 +825,10 @@ class OrderingFilter(BaseCSVFilter, ChoiceFilter):
     for APIs.
 
     """
+
+    # Ordering is not a row-level predicate and cannot be expressed as a
+    # Q object.
+    composable = False
 
     descending_fmt = _("%s (descending)")
 

@@ -1,0 +1,125 @@
+===============
+Condition trees
+===============
+
+Besides filtering by individual query parameters, a ``FilterSet`` can be
+given a whole condition tree, combining any of its declared filters with
+``and``, ``or`` and ``not`` logic. This is useful for advanced search UIs
+where the end user composes the query themselves.
+
+The motivating example: *"published and title contains a word, or the author
+belongs to a given list"*.
+
+A runnable example
+------------------
+
+Given these models::
+
+    from django.db import models
+
+    class Author(models.Model):
+        username = models.CharField(max_length=255)
+
+    class Article(models.Model):
+        title = models.CharField(max_length=255)
+        is_published = models.BooleanField(default=False)
+        author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+Declare the FilterSet. Leaves of the tree may only reference filters
+declared on the ``FilterSet``; the lookup used for each leaf is the one
+fixed by the filter declaration, never user input::
+
+    import django_filters
+    from django_filters import filters
+
+    class CharInFilter(filters.BaseInFilter, filters.CharFilter):
+        pass
+
+    class ArticleFilter(django_filters.FilterSet):
+        is_published = filters.BooleanFilter(field_name="is_published")
+        title = filters.CharFilter(field_name="title", lookup_expr="icontains")
+        author = CharInFilter(field_name="author__username")
+
+        class Meta:
+            model = Article
+            fields = []
+
+The tree
+--------
+
+A condition tree may be built from node objects or from plain dicts (handy
+when the tree arrives as JSON in a request body). The two forms are
+equivalent::
+
+    from django_filters import And, Or, Leaf
+
+    tree = Or(
+        And(Leaf("is_published", True), Leaf("title", "django")),
+        Leaf("author", ["alice", "bob"]),
+    )
+
+    # ...or, as plain dicts:
+
+    tree = {
+        "or": [
+            {"and": [
+                {"filter": "is_published", "value": True},
+                {"filter": "title", "value": "django"},
+            ]},
+            {"filter": "author", "value": ["alice", "bob"]},
+        ]
+    }
+
+Pass the tree to the filterset via ``condition_tree=``::
+
+    f = ArticleFilter(condition_tree=tree, queryset=Article.objects.all())
+
+    if f.is_valid():
+        results = f.qs
+    else:
+        print(f.condition_tree_errors)
+
+Normal query parameters and the condition tree can be combined; both are
+applied to the queryset::
+
+    f = ArticleFilter(data={"title": "django"}, condition_tree=tree,
+                      queryset=Article.objects.all())
+
+Validation and errors
+---------------------
+
+Leaf values are cleaned by the corresponding filter's form field, exactly
+like regular query parameters. All validation happens before any query is
+executed. Errors are reported as ``(path, message)`` tuples via
+``FilterSet.condition_tree_errors``, where the path locates the node in the
+tree::
+
+    >>> f.condition_tree_errors
+    [('$.or[0].and[1].value', 'Enter a valid number.')]
+
+Filters that cannot be expressed as a ``Q`` object — such as filters using
+``method=``, ``OrderingFilter``, ``DateRangeFilter`` or
+``LookupChoiceFilter`` — are rejected before the query runs. Custom filters
+opt in by implementing ``get_q()``::
+
+    from django.db.models import Q
+
+    class LowercaseUsernameFilter(filters.Filter):
+        def get_q(self, value):
+            return Q(username__iexact=value)
+
+``get_q()`` receives the cleaned value and must return a ``Q`` object (or
+``None`` to leave the query unconstrained).
+
+Limits
+------
+
+Trees are limited to a maximum depth and node count, configurable per
+``FilterSet``::
+
+    class ArticleFilter(django_filters.FilterSet):
+        condition_tree_max_depth = 5   # default
+        condition_tree_max_nodes = 50  # default
+
+Compilation is performed per filterset instance, so concurrent requests
+never share state.
