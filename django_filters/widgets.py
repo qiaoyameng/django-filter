@@ -139,6 +139,20 @@ class RangeWidget(SuffixedMultiWidget):
         return [None, None]
 
 
+class JSONPathWidget(SuffixedMultiWidget):
+    """
+    The widget for ``JSONPathField``: a select for the declared path name, a
+    select for the lookup expression, and an input for the comparison value.
+    """
+
+    suffixes = ["path", "lookup", "value"]
+
+    def decompress(self, value):
+        if value is None:
+            return [None, None, None]
+        return [value.path, value.lookup, value.value]
+
+
 class DateRangeWidget(RangeWidget):
     suffixes = ["after", "before"]
 

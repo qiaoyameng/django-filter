@@ -1,12 +1,21 @@
+import copy
+import json
+import re
+
 from collections import OrderedDict
 from collections.abc import Iterable
 from datetime import timedelta
 from itertools import chain
 
 from django import forms
+from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 from django.core.validators import MaxValueValidator
-from django.db.models import Q
+from django.db import connections, models
+from django.db.models import F, Func, Q, Value
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.fields.json import JSONField
+from django.db.models.functions import Cast
+from django.db.utils import NotSupportedError
 from django.forms.utils import pretty_name
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
@@ -21,6 +30,7 @@ from .fields import (
     DateTimeRangeField,
     IsoDateTimeField,
     IsoDateTimeRangeField,
+    JSONPathField,
     LookupChoiceField,
     ModelChoiceField,
     ModelMultipleChoiceField,
@@ -56,6 +66,8 @@ __all__ = [
     "Filter",
     "IsoDateTimeFilter",
     "IsoDateTimeFromToRangeFilter",
+    "JSONPath",
+    "JSONPathFilter",
     "LookupChoiceFilter",
     "ModelChoiceFilter",
     "ModelMultipleChoiceFilter",
@@ -712,6 +724,359 @@ class LookupChoiceFilter(Filter):
 
         self.lookup_expr = lookup.lookup_expr
         return super().filter(qs, lookup.value)
+
+
+class JSONExtract(Func):
+    """
+    Extracts a value from a JSON document using ``json_extract()``, with the
+    JSON path passed as a bound parameter instead of being interpolated into
+    the SQL.
+    """
+
+    function = "json_extract"
+    arity = 2
+    output_field = JSONField()
+
+
+class JSONType(Func):
+    """
+    Returns the JSON type of a value within a JSON document using
+    ``json_type()``, with the JSON path passed as a bound parameter.
+    """
+
+    function = "json_type"
+    arity = 2
+    output_field = models.CharField()
+
+
+class JSONPath:
+    """
+    Declaration of a single filterable path inside a ``JSONField``, used
+    with ``JSONPathFilter``.
+
+    * ``path`` is a list of key segments (strings) and array indexes
+      (integers) addressing a value inside the JSON document. Segments are
+      never interpreted as ORM lookups, so keys may contain ``__``, ``.`` or
+      quotes.
+
+    * ``field_class`` is the form field class used to validate the
+      comparison value. It also determines which JSON types are comparable and
+      the database type numeric values are compared as.
+
+    * ``lookups`` are the lookup expressions allowed for this path.
+
+    * ``db_type`` is an optional model field instance used to cast extracted
+      values. Defaults to a type inferred from ``field_class``.
+    """
+
+    INTEGER = "integer"
+    NUMBER = "number"
+    TEXT = "text"
+    BOOLEAN = "boolean"
+
+    #: Form field classes mapped to ``(kind, db type factory)``. The kind
+    #: determines which JSON types are comparable; the db type is used to cast
+    #: extracted values for comparison. Note that ``forms.DecimalField`` and
+    #: ``forms.FloatField`` are subclasses of ``forms.IntegerField``, so the
+    #: order matters.
+    FIELD_TYPES = (
+        (
+            forms.DecimalField,
+            NUMBER,
+            lambda: models.DecimalField(max_digits=38, decimal_places=10),
+        ),
+        (forms.FloatField, NUMBER, models.FloatField),
+        (forms.IntegerField, INTEGER, models.BigIntegerField),
+        (forms.BooleanField, BOOLEAN, None),
+        (forms.CharField, TEXT, None),
+    )
+
+    #: Lookup expressions that may be declared for a path.
+    ALLOWED_LOOKUPS = frozenset(
+        [
+            "exact",
+            "iexact",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "contains",
+            "icontains",
+            "startswith",
+            "istartswith",
+            "endswith",
+            "iendswith",
+        ]
+    )
+
+    LOOKUP_RE = re.compile(r"^[a-z0-9_]+$")
+
+    #: JSON types, as returned by the backend's JSON type function, that are
+    #: considered comparable for each kind, per database vendor.
+    JSON_TYPE_NAMES = {
+        "sqlite": {
+            INTEGER: ("integer",),
+            NUMBER: ("integer", "real"),
+            TEXT: ("text",),
+            BOOLEAN: ("true", "false"),
+        },
+    }
+
+    def __init__(
+        self, path, *, field_class=forms.CharField, lookups=("exact",), db_type=None
+    ):
+        self.path = self.validate_path(path)
+        self.field_class, self._field_template = self.validate_field_class(field_class)
+        self.kind, default_db_type = self.resolve_field_type(self.field_class)
+        self.lookups = self.validate_lookups(lookups)
+        if db_type is not None and not isinstance(db_type, models.Field):
+            raise ImproperlyConfigured(
+                "JSONPath 'db_type' must be a model field instance, got %r."
+                % (db_type,)
+            )
+        self.db_type = db_type if db_type is not None else default_db_type
+
+    @staticmethod
+    def validate_path(path):
+        if not isinstance(path, (list, tuple)) or not path:
+            raise ImproperlyConfigured(
+                "JSONPath 'path' must be a non-empty list or tuple of key "
+                "segments and array indexes."
+            )
+        segments = []
+        for segment in path:
+            if isinstance(segment, bool) or not isinstance(segment, (str, int)):
+                raise ImproperlyConfigured(
+                    "JSONPath segments must be strings or integers, got %r."
+                    % (segment,)
+                )
+            if isinstance(segment, str) and not segment:
+                raise ImproperlyConfigured("JSONPath key segments must not be empty.")
+            if isinstance(segment, int) and segment < 0:
+                raise ImproperlyConfigured(
+                    "JSONPath array indexes must not be negative."
+                )
+            segments.append(segment)
+        return tuple(segments)
+
+    @staticmethod
+    def validate_field_class(field_class):
+        template = None
+        if isinstance(field_class, forms.Field):
+            template = field_class
+            field_class = type(template)
+        if not (isinstance(field_class, type) and issubclass(field_class, forms.Field)):
+            raise ImproperlyConfigured(
+                "JSONPath 'field_class' must be a form field class or "
+                "instance, got %r." % (field_class,)
+            )
+        return field_class, template
+
+    @classmethod
+    def resolve_field_type(cls, field_class):
+        for base, kind, db_type_factory in cls.FIELD_TYPES:
+            if issubclass(field_class, base):
+                return kind, db_type_factory() if db_type_factory else None
+        raise ImproperlyConfigured(
+            "JSONPath does not support the %r form field class. Supported "
+            "base classes are: %s."
+            % (
+                field_class,
+                ", ".join(base.__name__ for base, _, _ in cls.FIELD_TYPES),
+            )
+        )
+
+    @classmethod
+    def validate_lookups(cls, lookups):
+        if isinstance(lookups, str) or not lookups:
+            raise ImproperlyConfigured(
+                "JSONPath 'lookups' must be a non-empty iterable of lookup "
+                "expressions."
+            )
+        validated = []
+        for lookup in lookups:
+            if not isinstance(lookup, str) or not cls.LOOKUP_RE.match(lookup):
+                raise ImproperlyConfigured(
+                    "JSONPath lookup %r is not a valid lookup expression."
+                    % (lookup,)
+                )
+            if lookup not in cls.ALLOWED_LOOKUPS:
+                raise ImproperlyConfigured(
+                    "JSONPath does not support the %r lookup. Supported "
+                    "lookups are: %s."
+                    % (lookup, ", ".join(sorted(cls.ALLOWED_LOOKUPS)))
+                )
+            if lookup not in validated:
+                validated.append(lookup)
+        return tuple(validated)
+
+    def build_form_field(self, **kwargs):
+        """Return a fresh form field instance for cleaning a comparison value."""
+        if self._field_template is not None:
+            field = copy.deepcopy(self._field_template)
+            for name, value in kwargs.items():
+                setattr(field, name, value)
+            return field
+        return self.field_class(**kwargs)
+
+    def compile_json_path(self):
+        """
+        Compile the declared path to a JSON path string. Keys are quoted and
+        escaped with ``json.dumps()``; the result is meant to be passed to
+        the database as a bound parameter, never interpolated into SQL.
+        """
+        parts = ["$"]
+        for segment in self.path:
+            if isinstance(segment, int):
+                parts.append("[%d]" % segment)
+            else:
+                parts.append(".%s" % json.dumps(segment))
+        return "".join(parts)
+
+    def check_supported(self, vendor):
+        """Raise ``NotSupportedError`` if the path cannot be addressed on ``vendor``."""
+        if vendor == "sqlite" and any(
+            isinstance(segment, str) and '"' in segment for segment in self.path
+        ):
+            raise NotSupportedError(
+                "JSONPathFilter cannot address keys containing double quotes on "
+                "the 'sqlite' backend."
+            )
+
+
+class JSONPathFilter(Filter):
+    """
+    Filters a ``JSONField`` by user-selected, pre-declared JSON paths.
+
+    * ``paths`` maps path names to ``JSONPath`` declarations. The path name
+      is what users select; the declared path itself is never taken from
+      user input, so JSON keys containing ``__``, ``.`` or quotes cannot be
+      misinterpreted as ORM lookups.
+
+    The comparison value is validated by the form field class declared for
+    the selected path, and is always passed to the database as a bound
+    parameter.
+
+    ex::
+
+        class ProductFilter(FilterSet):
+            attrs = JSONPathFilter(
+                field_name="attrs",
+                paths={
+                    "price": JSONPath(
+                        ["price"],
+                        field_class=forms.DecimalField,
+                        lookups=["exact", "gte", "lte"],
+                    ),
+                    "first_tag": JSONPath(
+                        ["tags", 0], lookups=["exact", "icontains"]
+                    ),
+                },
+            )
+
+            class Meta:
+                model = Product
+                fields = []
+
+    filters query strings such as
+    ``?attrs_path=price&attrs_lookup=gte&attrs_value=10``.
+    """
+
+    def __init__(self, field_name=None, *, paths, **kwargs):
+        if not isinstance(paths, dict) or not paths:
+            raise ImproperlyConfigured(
+                "JSONPathFilter requires a non-empty 'paths' dict mapping "
+                "path names to JSONPath declarations."
+            )
+        for name, config in paths.items():
+            if not isinstance(name, str) or not name:
+                raise ImproperlyConfigured(
+                    "JSONPathFilter path names must be non-empty strings, got %r."
+                    % (name,)
+                )
+            if not isinstance(config, JSONPath):
+                raise ImproperlyConfigured(
+                    "JSONPathFilter path %r must be declared with a JSONPath "
+                    "instance." % (name,)
+                )
+        self.paths = dict(paths)
+        super().__init__(field_name=field_name, **kwargs)
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            field_kwargs = {
+                "label": self.label,
+                "required": self.extra["required"],
+            }
+            if not settings.DISABLE_HELP_TEXT and "help_text" in self.extra:
+                field_kwargs["help_text"] = self.extra["help_text"]
+            self._field = JSONPathField(self.paths, **field_kwargs)
+        return self._field
+
+    def get_json_field(self):
+        try:
+            field = get_model_field(self.model, self.field_name)
+        except FieldDoesNotExist as e:
+            raise ImproperlyConfigured(
+                "JSONPathFilter cannot resolve field %r on model %s."
+                % (self.field_name, self.model.__name__)
+            ) from e
+        if not isinstance(field, JSONField):
+            raise ImproperlyConfigured(
+                "JSONPathFilter can only filter JSONFields. %r on model %s "
+                "is a %s."
+                % (self.field_name, self.model.__name__, type(field).__name__)
+            )
+        return field
+
+    @staticmethod
+    def get_extracted_output_field(config):
+        if config.kind == JSONPath.TEXT:
+            return models.CharField()
+        if config.kind == JSONPath.BOOLEAN:
+            return models.BooleanField()
+        return JSONField()
+
+    def filter(self, qs, value):
+        if value is None:
+            return qs
+
+        config = self.paths[value.path]
+        self.get_json_field()
+
+        connection = connections[qs.db]
+        try:
+            json_types = JSONPath.JSON_TYPE_NAMES[connection.vendor][config.kind]
+        except KeyError:
+            raise NotSupportedError(
+                "JSONPathFilter does not support the %r database backend."
+                % connection.vendor
+            )
+        config.check_supported(connection.vendor)
+
+        path = Value(config.compile_json_path(), output_field=models.CharField())
+        source = F(self.field_name)
+        extracted = JSONExtract(source, path)
+        json_type = JSONType(source, path)
+
+        value_alias = "_jsonpath_%x_value" % id(self)
+        type_alias = "_jsonpath_%x_type" % id(self)
+
+        if config.db_type is not None:
+            value_expression = Cast(extracted, config.db_type)
+        else:
+            extracted.output_field = self.get_extracted_output_field(config)
+            value_expression = extracted
+
+        qs = qs.annotate(**{value_alias: value_expression, type_alias: json_type})
+
+        condition = Q(**{"%s__in" % type_alias: json_types}) & Q(
+            **{"%s__%s" % (value_alias, value.lookup): value.value}
+        )
+        if self.distinct:
+            qs = qs.distinct()
+        return self.get_method(qs)(condition)
 
 
 class OrderingFilter(BaseCSVFilter, ChoiceFilter):

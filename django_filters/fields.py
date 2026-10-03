@@ -13,6 +13,7 @@ from .widgets import (
     BaseCSVWidget,
     CSVWidget,
     DateRangeWidget,
+    JSONPathWidget,
     LookupChoiceWidget,
     RangeWidget,
 )
@@ -120,6 +121,81 @@ class LookupChoiceField(forms.MultiValueField):
                         self.error_messages["lookup_required"], code="lookup_required"
                     )
         return None
+
+
+class JSONPathLookup(namedtuple("JSONPathLookup", ("path", "lookup", "value"))):
+    """
+    The cleaned value of a ``JSONPathField``: the declared path name, the
+    lookup expression and the cleaned comparison value.
+    """
+
+    __slots__ = ()
+
+
+class JSONPathField(forms.MultiValueField):
+    """
+    A MultiValueField that validates a path name, a lookup expression and a
+    comparison value against the paths declared on a ``JSONPathFilter``.
+
+    Unknown path names and lookup expressions are rejected by the path and
+    lookup subfields, while lookups that are not allowed for the selected path
+    are rejected here, in ``compress()``. The comparison value is cleaned with
+    the form field class declared for the selected path.
+    """
+
+    widget = JSONPathWidget
+
+    default_error_messages = {
+        "incomplete": _("Select a path, a lookup and a value."),
+        "invalid_lookup": _("Lookup %(lookup)r is not allowed for path %(path)r."),
+    }
+
+    def __init__(self, paths, *args, **kwargs):
+        self.paths = paths
+        lookup_choices = sorted(
+            {lookup for config in paths.values() for lookup in config.lookups}
+        )
+        fields = (
+            forms.ChoiceField(
+                choices=[(name, name) for name in paths], required=False
+            ),
+            forms.ChoiceField(
+                choices=[(lookup, lookup) for lookup in lookup_choices],
+                required=False
+            ),
+            forms.CharField(required=False),
+        )
+        kwargs.setdefault("require_all_fields", False)
+        kwargs["widget"] = JSONPathWidget(widgets=[field.widget for field in fields])
+        super().__init__(fields, *args, **kwargs)
+
+    def compress(self, data_list):
+        if not data_list:
+            return None
+        path, lookup, raw_value = data_list
+        if (
+            path in EMPTY_VALUES
+            and lookup in EMPTY_VALUES
+            and raw_value in EMPTY_VALUES
+        ):
+            return None
+        if (
+            path in EMPTY_VALUES
+            or lookup in EMPTY_VALUES
+            or raw_value in EMPTY_VALUES
+        ):
+            raise forms.ValidationError(self.error_messages["incomplete"], code="incomplete")
+        config = self.paths[path]
+        if lookup not in config.lookups:
+            raise forms.ValidationError(
+                self.error_messages["invalid_lookup"],
+                code="invalid_lookup",
+                params={"lookup": lookup, "path": path},
+            )
+        # Note: the field is not required - emptiness is checked above. This also
+        # avoids BooleanField's "required means checked" validation for false values.
+        value = config.build_form_field(required=False).clean(raw_value)
+        return JSONPathLookup(path, lookup, value)
 
 
 class IsoDateTimeField(forms.DateTimeField):

@@ -667,6 +667,54 @@ ex::
         ]
     )
 
+.. _json-path-filter:
+
+.. class:: JSONPathFilter
+
+This filter allows filtering on values inside a ``JSONField``, addressed by
+a JSON path. It takes a ``paths`` argument mapping path names to
+``JSONPath`` declarations, which describe where a value lives inside the
+JSON document, which form field validates the comparison value, and which
+lookup expressions are allowed.
+
+* ``path`` is a list of key segments (strings) and array indexes (integers)
+  addressing a value inside the JSON document. Segments are never
+  interpreted as ORM lookups, so keys may contain ``__``, ``.`` or quotes.
+
+* ``field_class`` is the form field class used to validate the comparison
+  value. It also determines which JSON types are comparable and the database
+  type numeric values are compared as.
+
+* ``lookups`` are the lookup expressions allowed for this path.
+
+The comparison value is validated by the declared form field and is always
+passed to the database as a bound parameter. Unknown path names or lookup
+expressions are rejected by the filter's form field.
+
+ex::
+
+    class ProductFilter(FilterSet):
+        attrs = django_filters.JSONPathFilter(
+            field_name="attrs",
+            paths={
+                "price": django_filters.JSONPath(
+                    ["price"],
+                    field_class=forms.DecimalField,
+                    lookups=["exact", "gte", "lte"],
+                ),
+                "first_tag": django_filters.JSONPath(
+                    ["tags", 0], lookups=["exact", "icontains"]
+                ),
+            },
+        )
+
+        class Meta:
+            model = Product
+            fields = []
+
+This filters query strings such as
+``?attrs_path=price&attrs_lookup=gte&attrs_value=10``.
+
 .. _base-in-filter:
 .. class:: BaseInFilter
 
