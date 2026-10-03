@@ -1,7 +1,9 @@
 from collections import namedtuple
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django import forms
+from django.utils import timezone as django_timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.encoding import force_str
 from django.utils.translation import gettext_lazy as _
@@ -23,6 +25,164 @@ except ImportError:
     DJANGO_50 = False
 else:
     DJANGO_50 = True
+
+
+EARLIER = "earlier"
+LATER = "later"
+RAISE = "raise"
+SHIFT_BACKWARD = "shift-backward"
+SHIFT_FORWARD = "shift-forward"
+
+AMBIGUOUS_POLICIES = {EARLIER, LATER, RAISE}
+NONEXISTENT_POLICIES = {SHIFT_BACKWARD, SHIFT_FORWARD, RAISE}
+
+
+class TimezoneValidationError(forms.ValidationError):
+    pass
+
+
+def resolve_timezone(value):
+    if value is None:
+        return django_timezone.get_default_timezone()
+    if callable(value):
+        return resolve_timezone(value())
+    if isinstance(value, tzinfo):
+        return value
+    if isinstance(value, str):
+        try:
+            return ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise TimezoneValidationError(
+                _("Select a valid time zone."), code="invalid_timezone"
+            ) from exc
+    raise TimezoneValidationError(
+        _("Select a valid time zone."), code="invalid_timezone"
+    )
+
+
+def _is_pytz_timezone(tz):
+    return tz.__class__.__module__.startswith("pytz")
+
+
+def _datetime_with_fold(value, tz, fold):
+    return value.replace(tzinfo=tz, fold=fold)
+
+
+def _is_ambiguous(value, tz):
+    earlier = _datetime_with_fold(value, tz, 0)
+    later = _datetime_with_fold(value, tz, 1)
+    return earlier.utcoffset() != later.utcoffset()
+
+
+def _is_nonexistent(value, tz):
+    candidate = _datetime_with_fold(value, tz, 0)
+    round_trip = candidate.astimezone(timezone.utc).astimezone(tz)
+    return round_trip.replace(tzinfo=None) != value
+
+
+def localize_datetime(value, tz, nonexistent_policy, ambiguous_policy):
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc)
+    if _is_pytz_timezone(tz):
+        return _localize_pytz_datetime(
+            value, tz, nonexistent_policy, ambiguous_policy
+        )
+
+    if _is_nonexistent(value, tz):
+        if nonexistent_policy == RAISE:
+            raise forms.ValidationError(
+                _("That time does not exist in the selected time zone."),
+                code="nonexistent_datetime",
+            )
+        fold = 0 if nonexistent_policy == SHIFT_FORWARD else 1
+        candidate = _datetime_with_fold(value, tz, fold)
+        return candidate.astimezone(timezone.utc)
+
+    if _is_ambiguous(value, tz):
+        if ambiguous_policy == RAISE:
+            raise forms.ValidationError(
+                _("That time is ambiguous in the selected time zone."),
+                code="ambiguous_datetime",
+            )
+        fold = 1 if ambiguous_policy == LATER else 0
+        value = _datetime_with_fold(value, tz, fold)
+
+    return value.replace(tzinfo=tz).astimezone(timezone.utc)
+
+
+def _localize_pytz_datetime(value, tz, nonexistent_policy, ambiguous_policy):
+    from pytz import exceptions
+
+    try:
+        return tz.localize(value, is_dst=None).astimezone(timezone.utc)
+    except exceptions.NonExistentTimeError:
+        if nonexistent_policy == RAISE:
+            raise forms.ValidationError(
+                _("That time does not exist in the selected time zone."),
+                code="nonexistent_datetime",
+            )
+        candidates = _pytz_candidates(value, tz)
+        if nonexistent_policy == SHIFT_FORWARD:
+            forward = min(candidates)
+        else:
+            forward = max(candidates)
+        return forward
+    except exceptions.AmbiguousTimeError:
+        if ambiguous_policy == RAISE:
+            raise forms.ValidationError(
+                _("That time is ambiguous in the selected time zone."),
+                code="ambiguous_datetime",
+            )
+        candidates = _pytz_candidates(value, tz)
+        if ambiguous_policy == LATER:
+            return max(candidates)
+        return min(candidates)
+
+
+def _pytz_candidates(value, tz):
+    return [
+        tz.localize(value, is_dst=False).astimezone(timezone.utc),
+        tz.localize(value, is_dst=True).astimezone(timezone.utc),
+    ]
+
+
+def localize_date_boundary(value, tz, *, nonexistent_policy):
+    if _is_pytz_timezone(tz):
+        return _localize_pytz_date_boundary(value, tz, nonexistent_policy)
+
+    if not _is_nonexistent(value, tz):
+        return _datetime_with_fold(value, tz, 0).astimezone(timezone.utc)
+
+    if nonexistent_policy == RAISE:
+        raise forms.ValidationError(
+            _("That date does not begin at midnight in the selected time zone."),
+            code="nonexistent_datetime",
+        )
+
+    fold = 0 if nonexistent_policy == SHIFT_FORWARD else 1
+    return _datetime_with_fold(value, tz, fold).astimezone(timezone.utc)
+
+
+def _localize_pytz_date_boundary(value, tz, nonexistent_policy):
+    from pytz import exceptions
+
+    try:
+        localized = tz.localize(value, is_dst=None)
+    except exceptions.AmbiguousTimeError:
+        localized = min(_pytz_candidates(value, tz)).astimezone(tz)
+    except exceptions.NonExistentTimeError:
+        if nonexistent_policy == RAISE:
+            raise forms.ValidationError(
+                _("That date does not begin at midnight in the selected time zone."),
+                code="nonexistent_datetime",
+            )
+        candidates = _pytz_candidates(value, tz)
+        if nonexistent_policy == SHIFT_FORWARD:
+            localized = min(candidates).astimezone(tz)
+        else:
+            localized = max(candidates).astimezone(tz)
+
+    return localized.astimezone(timezone.utc)
 
 
 class RangeField(forms.MultiValueField):
@@ -61,11 +221,126 @@ class DateRangeField(RangeField):
         return None
 
 
+class TimezoneAwareDateRangeField(RangeField):
+    widget = DateRangeWidget
+
+    def __init__(
+        self,
+        *args,
+        timezone=None,
+        nonexistent_policy,
+        **kwargs
+    ):
+        fields = (forms.DateField(), forms.DateField())
+        self._timezone = timezone
+        if nonexistent_policy not in NONEXISTENT_POLICIES:
+            raise ValueError("Invalid nonexistent datetime policy.")
+        self.nonexistent_policy = nonexistent_policy
+        super().__init__(fields, *args, **kwargs)
+
+    def compress(self, data_list):
+        if data_list:
+            start_date, stop_date = data_list
+            tz = resolve_timezone(self._timezone)
+            if start_date:
+                start = localize_date_boundary(
+                    datetime.combine(start_date, time.min),
+                    tz,
+                    nonexistent_policy=self.nonexistent_policy,
+                )
+            else:
+                start = None
+            if stop_date:
+                stop = localize_date_boundary(
+                    datetime.combine(stop_date + timedelta(days=1), time.min),
+                    tz,
+                    nonexistent_policy=self.nonexistent_policy,
+                )
+            else:
+                stop = None
+            return slice(start, stop)
+        return None
+
+
 class DateTimeRangeField(RangeField):
     widget = DateRangeWidget
 
     def __init__(self, *args, **kwargs):
         fields = (forms.DateTimeField(), forms.DateTimeField())
+        super().__init__(fields, *args, **kwargs)
+
+
+class TimezoneAwareDateTimeField(forms.DateTimeField):
+    def __init__(
+        self,
+        *args,
+        timezone=None,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self._timezone = timezone
+        if nonexistent_policy not in NONEXISTENT_POLICIES:
+            raise ValueError("Invalid nonexistent datetime policy.")
+        if ambiguous_policy not in AMBIGUOUS_POLICIES:
+            raise ValueError("Invalid ambiguous datetime policy.")
+        self.nonexistent_policy = nonexistent_policy
+        self.ambiguous_policy = ambiguous_policy
+
+    def to_python(self, value):
+        if value in self.empty_values:
+            return None
+
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, time):
+            raise forms.ValidationError(
+                self.error_messages["invalid"], code="invalid"
+            )
+        else:
+            value = force_str(value).strip()
+            parsed = parse_datetime(value)
+            if parsed is None:
+                parsed = self._parse_with_input_formats(value)
+
+        tz = resolve_timezone(self._timezone)
+        return localize_datetime(
+            parsed, tz, self.nonexistent_policy, self.ambiguous_policy
+        )
+
+    def _parse_with_input_formats(self, value):
+        for input_format in self.input_formats:
+            try:
+                return self.strptime(value, input_format)
+            except (ValueError, TypeError):
+                continue
+        raise forms.ValidationError(self.error_messages["invalid"], code="invalid")
+
+
+class TimezoneAwareDateTimeRangeField(RangeField):
+    widget = DateRangeWidget
+
+    def __init__(
+        self,
+        *args,
+        timezone=None,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs
+    ):
+        fields = (
+            TimezoneAwareDateTimeField(
+                timezone=timezone,
+                nonexistent_policy=nonexistent_policy,
+                ambiguous_policy=ambiguous_policy,
+            ),
+            TimezoneAwareDateTimeField(
+                timezone=timezone,
+                nonexistent_policy=nonexistent_policy,
+                ambiguous_policy=ambiguous_policy,
+            ),
+        )
         super().__init__(fields, *args, **kwargs)
 
 

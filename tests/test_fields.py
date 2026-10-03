@@ -2,6 +2,7 @@ import datetime as dt
 import decimal
 import unittest
 from datetime import datetime, time, timedelta, tzinfo
+from zoneinfo import ZoneInfo
 
 import django
 import pytz
@@ -15,12 +16,18 @@ from django_filters.fields import (
     ChoiceField,
     DateRangeField,
     DateTimeRangeField,
+    EARLIER,
+    LATER,
     IsoDateTimeField,
     IsoDateTimeRangeField,
     Lookup,
     LookupChoiceField,
     RangeField,
+    SHIFT_BACKWARD,
+    SHIFT_FORWARD,
     TimeRangeField,
+    TimezoneAwareDateRangeField,
+    TimezoneAwareDateTimeRangeField,
 )
 from django_filters.widgets import BaseCSVWidget, CSVWidget, RangeWidget
 
@@ -98,6 +105,195 @@ class DateTimeRangeFieldTests(TestCase):
             f.clean(["2015-01-01 10:30", "2015-01-10 8:45"]),
             slice(datetime(2015, 1, 1, 10, 30, 0), datetime(2015, 1, 10, 8, 45, 0)),
         )
+
+
+class TimezoneAwareDateRangeFieldTests(TestCase):
+    def test_twenty_three_hour_day(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            required=False,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-03-31", "2024-03-31"]),
+            slice(
+                datetime(2024, 3, 30, 23, tzinfo=dt.timezone.utc),
+                datetime(2024, 3, 31, 22, tzinfo=dt.timezone.utc),
+            ),
+        )
+
+    def test_twenty_five_hour_day(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-10-27", "2024-10-27"]),
+            slice(
+                datetime(2024, 10, 26, 22, tzinfo=dt.timezone.utc),
+                datetime(2024, 10, 27, 23, tzinfo=dt.timezone.utc),
+            ),
+        )
+
+    def test_nonexistent_midnight_policies(self):
+        forward = TimezoneAwareDateRangeField(
+            timezone="America/Havana",
+            nonexistent_policy=SHIFT_FORWARD,
+            required=False,
+        )
+        backward = TimezoneAwareDateRangeField(
+            timezone="America/Havana",
+            nonexistent_policy=SHIFT_BACKWARD,
+            required=False,
+        )
+
+        self.assertEqual(
+            forward.clean(["2024-03-10", ""]).start,
+            datetime(2024, 3, 10, 5, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(
+            backward.clean(["2024-03-10", ""]).start,
+            datetime(2024, 3, 10, 4, tzinfo=dt.timezone.utc),
+        )
+
+    def test_nonexistent_midnight_raises_form_error(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="America/Havana",
+            nonexistent_policy="raise",
+            required=False,
+        )
+
+        with self.assertRaises(forms.ValidationError) as ctx:
+            field.clean(["2024-03-10", ""])
+        self.assertEqual(ctx.exception.code, "nonexistent_datetime")
+
+    def test_invalid_timezone_is_form_error(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="Etc/Invalid",
+            nonexistent_policy=SHIFT_FORWARD,
+            required=False,
+        )
+
+        with self.assertRaises(forms.ValidationError) as ctx:
+            field.clean(["2024-03-31", ""])
+        self.assertEqual(ctx.exception.code, "invalid_timezone")
+
+
+class TimezoneAwareDateTimeRangeFieldTests(TestCase):
+    def test_ambiguous_datetime_policies(self):
+        earlier = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+        later = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+            required=False,
+        )
+
+        self.assertEqual(
+            earlier.clean(["2024-10-27T02:30:00", ""]).start,
+            datetime(2024, 10, 27, 0, 30, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(
+            later.clean(["2024-10-27T02:30:00", ""]).start,
+            datetime(2024, 10, 27, 1, 30, tzinfo=dt.timezone.utc),
+        )
+
+    def test_nonexistent_datetime_policies(self):
+        forward = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+        backward = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_BACKWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+
+        self.assertEqual(
+            forward.clean(["2024-03-31T02:30:00", ""]).start,
+            datetime(2024, 3, 31, 1, 30, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(
+            backward.clean(["2024-03-31T02:30:00", ""]).start,
+            datetime(2024, 3, 31, 0, 30, tzinfo=dt.timezone.utc),
+        )
+
+    def test_nonexistent_or_ambiguous_datetime_raises_form_error(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy="raise",
+            ambiguous_policy="raise",
+            required=False,
+        )
+
+        with self.assertRaises(forms.ValidationError) as ctx:
+            field.clean(["2024-03-31T02:30:00", ""])
+        self.assertEqual(ctx.exception.error_list[0].code, "nonexistent_datetime")
+
+        with self.assertRaises(forms.ValidationError) as ctx:
+            field.clean(["2024-10-27T02:30:00", ""])
+        self.assertEqual(ctx.exception.error_list[0].code, "ambiguous_datetime")
+
+    def test_offset_input_is_converted_to_utc(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-03-31T02:30:00+03:00", ""]).start,
+            datetime(2024, 3, 30, 23, 30, tzinfo=dt.timezone.utc),
+        )
+
+    def test_timezone_object_is_accepted(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone=ZoneInfo("Europe/Paris"),
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-03-31 12:00", ""]).start,
+            datetime(2024, 3, 31, 10, tzinfo=dt.timezone.utc),
+        )
+
+    def test_pytz_timezone_object_is_accepted(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone=pytz.timezone("Europe/Paris"),
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+
+        self.assertEqual(
+            field.clean(["2017-03-26T02:30:00", ""]).start,
+            datetime(2017, 3, 26, 0, 30, tzinfo=dt.timezone.utc),
+        )
+
+    def test_invalid_timezone_is_form_error(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone="Etc/Invalid",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+
+        with self.assertRaises(forms.ValidationError) as ctx:
+            field.clean(["2024-03-31T12:00:00", ""])
+        self.assertEqual(ctx.exception.error_list[0].code, "invalid_timezone")
 
 
 class IsoDateTimeRangeFieldTests(TestCase):

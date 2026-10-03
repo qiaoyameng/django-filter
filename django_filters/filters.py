@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 from datetime import timedelta
+from inspect import Parameter, signature
 from itertools import chain
 
 from django import forms
@@ -14,19 +15,28 @@ from django.utils.translation import gettext_lazy as _
 from .conf import settings
 from .constants import EMPTY_VALUES
 from .fields import (
+    AMBIGUOUS_POLICIES,
     BaseCSVField,
     BaseRangeField,
     ChoiceField,
     DateRangeField,
     DateTimeRangeField,
+    EARLIER,
+    LATER,
     IsoDateTimeField,
     IsoDateTimeRangeField,
     LookupChoiceField,
     ModelChoiceField,
     ModelMultipleChoiceField,
     MultipleChoiceField,
+    NONEXISTENT_POLICIES,
+    RAISE,
     RangeField,
+    SHIFT_BACKWARD,
+    SHIFT_FORWARD,
     TimeRangeField,
+    TimezoneAwareDateRangeField,
+    TimezoneAwareDateTimeRangeField,
 )
 from .utils import get_model_field, label_for_filter
 
@@ -65,6 +75,15 @@ __all__ = [
     "OrderingFilter",
     "RangeFilter",
     "TimeFilter",
+    "EARLIER",
+    "LATER",
+    "RAISE",
+    "SHIFT_BACKWARD",
+    "SHIFT_FORWARD",
+    "TZDateFromToRangeFilter",
+    "TZDateTimeFromToRangeFilter",
+    "TimezoneAwareDateFromToRangeFilter",
+    "TimezoneAwareDateTimeFromToRangeFilter",
     "TimeRangeFilter",
     "TypedChoiceFilter",
     "TypedMultipleChoiceFilter",
@@ -523,6 +542,122 @@ class DateRangeFilter(ChoiceFilter):
 
 class DateFromToRangeFilter(RangeFilter):
     field_class = DateRangeField
+
+
+class TimezoneAwareRangeFilterMixin:
+    def __init__(self, *args, timezone=None, **kwargs):
+        self._timezone = timezone
+        super().__init__(*args, **kwargs)
+
+    def get_timezone(self):
+        if self._timezone is None:
+            return None
+        if callable(self._timezone):
+            request = getattr(self, "parent", None)
+            request = getattr(request, "request", None)
+            try:
+                parameters = signature(self._timezone).parameters.values()
+            except (TypeError, ValueError):
+                return self._timezone(request)
+
+            accepts_request = any(
+                parameter.kind
+                in (
+                    Parameter.POSITIONAL_ONLY,
+                    Parameter.POSITIONAL_OR_KEYWORD,
+                    Parameter.VAR_POSITIONAL,
+                    Parameter.VAR_KEYWORD,
+                )
+                for parameter in parameters
+            )
+            if accepts_request:
+                return self._timezone(request)
+            return self._timezone()
+        return self._timezone
+
+
+class TimezoneAwareDateFromToRangeFilter(TimezoneAwareRangeFilterMixin, Filter):
+    field_class = TimezoneAwareDateRangeField
+
+    def __init__(self, *args, nonexistent_policy, **kwargs):
+        if nonexistent_policy not in NONEXISTENT_POLICIES:
+            raise ValueError("Invalid nonexistent datetime policy.")
+        self.nonexistent_policy = nonexistent_policy
+        super().__init__(*args, **kwargs)
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            self._field = self.field_class(
+                label=self.label,
+                timezone=self.get_timezone,
+                nonexistent_policy=self.nonexistent_policy,
+                **self.field_kwargs
+            )
+        return self._field
+
+    def filter(self, qs, value):
+        if not value:
+            return qs
+        if self.distinct:
+            qs = qs.distinct()
+
+        conditions = Q()
+        if value.start is not None:
+            conditions &= Q(**{"%s__gte" % self.field_name: value.start})
+        if value.stop is not None:
+            conditions &= Q(**{"%s__lt" % self.field_name: value.stop})
+
+        return self.get_method(qs)(conditions)
+
+    @property
+    def field_kwargs(self):
+        kwargs = self.extra.copy()
+        if settings.DISABLE_HELP_TEXT:
+            kwargs.pop("help_text", None)
+        return kwargs
+
+
+class TimezoneAwareDateTimeFromToRangeFilter(TimezoneAwareRangeFilterMixin, RangeFilter):
+    field_class = TimezoneAwareDateTimeRangeField
+
+    def __init__(
+        self,
+        *args,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs
+    ):
+        if nonexistent_policy not in NONEXISTENT_POLICIES:
+            raise ValueError("Invalid nonexistent datetime policy.")
+        if ambiguous_policy not in AMBIGUOUS_POLICIES:
+            raise ValueError("Invalid ambiguous datetime policy.")
+        self.nonexistent_policy = nonexistent_policy
+        self.ambiguous_policy = ambiguous_policy
+        super().__init__(*args, **kwargs)
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            self._field = self.field_class(
+                label=self.label,
+                timezone=self.get_timezone,
+                nonexistent_policy=self.nonexistent_policy,
+                ambiguous_policy=self.ambiguous_policy,
+                **self.field_kwargs
+            )
+        return self._field
+
+    @property
+    def field_kwargs(self):
+        kwargs = self.extra.copy()
+        if settings.DISABLE_HELP_TEXT:
+            kwargs.pop("help_text", None)
+        return kwargs
+
+
+TZDateFromToRangeFilter = TimezoneAwareDateFromToRangeFilter
+TZDateTimeFromToRangeFilter = TimezoneAwareDateTimeFromToRangeFilter
 
 
 class DateTimeFromToRangeFilter(RangeFilter):

@@ -536,6 +536,30 @@ Example of using the :class:`~django.db.models.DateTimeField` field::
     f = F({'published_before': '2016-02-01'})
     assert len(f.qs) == 2
 
+.. class:: TimezoneAwareDateFromToRangeFilter
+
+Filters a timezone-aware :class:`~django.db.models.DateTimeField` by a local
+calendar date. Local dates are converted to a half-open UTC interval
+(``gte`` start, ``lt`` start of the following local date), so 23-hour and
+25-hour DST days are handled without adding 24 hours to the selected date.
+
+The ``timezone`` argument accepts a :class:`datetime.tzinfo`, an IANA time zone
+name, or a callable. A callable is called with the current request when it
+accepts one, otherwise with no arguments. This allows the time zone to be
+provided by server configuration or by already-validated request context.
+Django's global current time zone is not changed.
+
+``nonexistent_policy`` is required and selects how a date whose local midnight
+does not exist is handled: ``SHIFT_FORWARD``, ``SHIFT_BACKWARD``, or ``RAISE``.
+Repeated date boundaries are resolved to the earlier occurrence so that the
+full calendar day is represented. An unresolvable time zone is reported as a
+form error. ::
+
+    published = TimezoneAwareDateFromToRangeFilter(
+        timezone=request_timezone,
+        nonexistent_policy=SHIFT_FORWARD,
+    )
+
 .. class:: DateTimeFromToRangeFilter
 
 Similar to a :class:`~django_filters.filters.RangeFilter` except it uses datetime
@@ -568,6 +592,27 @@ Example::
     # Max-Only: Articles published before 2016-01-01 10:00
     f = F({'published_before': '2016-01-01 10:00'})
     assert len(f.qs) == 2
+
+.. class:: TimezoneAwareDateTimeFromToRangeFilter
+
+Filters timezone-aware datetimes using an explicit time zone. Naive input is
+interpreted in the configured time zone and converted to UTC. Aware input,
+including ISO 8601 values with an offset, is converted to UTC without applying
+the ambiguity policy.
+
+Both DST policies must be specified explicitly:
+
+* ``nonexistent_policy``: ``SHIFT_FORWARD``, ``SHIFT_BACKWARD``, or ``RAISE``
+* ``ambiguous_policy``: ``EARLIER``, ``LATER``, or ``RAISE``
+
+Invalid, nonexistent, and ambiguous times selected with ``RAISE`` are form
+errors. ::
+
+    published = TimezoneAwareDateTimeFromToRangeFilter(
+        timezone=request_timezone,
+        nonexistent_policy=SHIFT_FORWARD,
+        ambiguous_policy=LATER,
+    )
 
 .. class:: IsoDateTimeFromToRangeFilter
 
