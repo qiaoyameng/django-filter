@@ -7,6 +7,43 @@ Field Reference
 
 .. currentmodule:: django_filters.fields
 
+.. class:: IntervalField
+
+A :class:`~django.forms.MultiValueField` that cleans a mathematical interval
+with explicit open/closed boundaries, such as ``[10, 20)``. It combines two
+endpoint fields (``forms.DecimalField`` by default) with two boundary flags.
+
+The compressed value is an :class:`Interval` of :class:`IntervalEndpoint`
+instances, or ``None`` when neither endpoint is provided. Each endpoint's
+``value`` is the cleaned endpoint value (``None`` on an unbounded side) and
+``open`` indicates an open (``(``/``)``) boundary::
+
+    >>> f = IntervalField()
+    >>> f.clean(['10', 'open', '20', ''])
+    Interval(start=IntervalEndpoint(value=Decimal('10'), open=True),
+             stop=IntervalEndpoint(value=Decimal('20'), open=False))
+    >>> f.clean(['10', '', '', ''])  # half-bounded [10, +inf)
+    Interval(start=IntervalEndpoint(value=Decimal('10'), open=False), stop=None)
+    >>> f.clean(['', '', '', ''])  # no interval provided
+    None
+
+Reversed boundaries (``start > stop``) raise an ``invalid_order`` validation
+error and equal endpoints with an open boundary (an empty interval such as
+``[10, 10)``) raise an ``empty`` error.
+
+Pass a two-tuple of endpoint fields to reuse the field with another value
+type, such as integers::
+
+    IntervalField(fields=(forms.IntegerField(), forms.IntegerField()))
+
+.. class:: DateIntervalField
+
+An :class:`IntervalField` whose endpoint fields are
+:class:`~django.forms.DateField` instances. A closed boundary is expanded to
+cover the whole day (``datetime.time.min`` for the start and
+``datetime.time.max`` for the stop, made aware when ``USE_TZ`` is enabled),
+while an open boundary keeps the plain date so the boundary day is excluded.
+
 .. class:: IsoDateTimeField
 
 Extends :class:`django.forms.DateTimeField` to allow parsing ISO 8601 formated dates, in addition to existing formats
@@ -21,4 +58,3 @@ You may set :attr:`~django.forms.DateTimeField.input_formats` to your list of re
 
     f = IsoDateTimeField()
     f.input_formats = [IsoDateTimeField.ISO_8601] + DateTimeField.input_formats
-

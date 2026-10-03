@@ -143,6 +143,76 @@ class DateRangeWidget(RangeWidget):
     suffixes = ["after", "before"]
 
 
+class BoundaryWidget(forms.Select):
+    """
+    Selects whether an interval endpoint is included (closed boundary,
+    ``[``/``]``) or excluded (open boundary, ``(``/``)``).
+
+    The widget's value is :attr:`OPEN` for an open boundary, the empty
+    string for an explicitly closed boundary, or ``None`` when the parameter
+    is absent from the submitted data. Both non-open values compress to a
+    closed boundary.
+    """
+
+    CLOSED = ""
+    OPEN = "open"
+
+    def __init__(self, open_label=None, closed_label=None, attrs=None):
+        if open_label is None:
+            open_label = _("Exclude endpoint")
+        if closed_label is None:
+            closed_label = _("Include endpoint")
+        choices = ((self.CLOSED, closed_label), (self.OPEN, open_label))
+        super().__init__(attrs, choices)
+
+    def value_from_datadict(self, data, files, name):
+        value = super().value_from_datadict(data, files, name)
+        return self.OPEN if value == self.OPEN else value
+
+
+class IntervalWidget(SuffixedMultiWidget):
+    """
+    Renders the two endpoints of an interval together with their boundary
+    inclusion flags (four inputs total)::
+
+        [<start_after>] ... [<end_before>]
+
+    Each boundary defaults to a text input; date based intervals pass in
+    date inputs.
+    """
+
+    template_name = "django_filters/widgets/multiwidget.html"
+    suffixes = ["after", "after_open", "before", "before_open"]
+
+    def __init__(self, attrs=None, endpoint_widget=forms.TextInput):
+        widgets = (
+            endpoint_widget,
+            BoundaryWidget,
+            endpoint_widget,
+            BoundaryWidget,
+        )
+        super().__init__(widgets, attrs)
+
+    def decompress(self, value):
+        if value:
+            start_open = getattr(value.start, "open", False)
+            stop_open = getattr(value.stop, "open", False)
+            start_value = getattr(value.start, "value", None)
+            stop_value = getattr(value.stop, "value", None)
+            return [
+                start_value,
+                BoundaryWidget.OPEN if start_open else BoundaryWidget.CLOSED,
+                stop_value,
+                BoundaryWidget.OPEN if stop_open else BoundaryWidget.CLOSED,
+            ]
+        return [None, BoundaryWidget.CLOSED, None, BoundaryWidget.CLOSED]
+
+
+class DateIntervalWidget(IntervalWidget):
+    def __init__(self, attrs=None):
+        super().__init__(attrs, endpoint_widget=forms.DateInput)
+
+
 class LookupChoiceWidget(SuffixedMultiWidget):
     suffixes = [None, "lookup"]
 

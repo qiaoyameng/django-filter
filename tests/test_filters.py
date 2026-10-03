@@ -13,8 +13,12 @@ from django.utils.translation import gettext as _
 from django_filters import filters, widgets
 from django_filters.fields import (
     BaseCSVField,
+    DateIntervalField,
     DateRangeField,
     DateTimeRangeField,
+    Interval,
+    IntervalEndpoint,
+    IntervalField,
     IsoDateTimeRangeField,
     Lookup,
     RangeField,
@@ -30,11 +34,13 @@ from django_filters.filters import (
     ChoiceFilter,
     DateFilter,
     DateFromToRangeFilter,
+    DateIntervalFilter,
     DateRangeFilter,
     DateTimeFilter,
     DateTimeFromToRangeFilter,
     DurationFilter,
     Filter,
+    IntervalFilter,
     IsoDateTimeFromToRangeFilter,
     LookupChoiceFilter,
     ModelChoiceFilter,
@@ -1063,6 +1069,122 @@ class RangeFilterTests(TestCase):
         f.filter(qs, mock.Mock(start=None, stop=30))
         qs.distinct.assert_called_once()
         qs.distinct.return_value.filter.assert_called_once_with(None__lte=30)
+
+
+class IntervalFilterTests(TestCase):
+    def endpoint(self, value, open=False):
+        if value is None:
+            return None
+        return IntervalEndpoint(value, open=open)
+
+    def interval(self, start=None, start_open=False, stop=None, stop_open=False):
+        return Interval(
+            self.endpoint(start, start_open), self.endpoint(stop, stop_open)
+        )
+
+    def filtered(self, qs, value, **kwargs):
+        f = IntervalFilter(field_name="price", **kwargs)
+        return f, f.filter(qs, value)
+
+    def test_default_field(self):
+        f = IntervalFilter()
+        self.assertIsInstance(f.field, IntervalField)
+
+    def test_date_field(self):
+        f = DateIntervalFilter()
+        self.assertIsInstance(f.field, DateIntervalField)
+
+    def test_non_interval_value_is_noop(self):
+        qs = mock.Mock(spec=[])
+        for value in (None, "", []):
+            with self.subTest(value=value):
+                _, result = self.filtered(qs, value)
+                self.assertEqual(qs, result)
+
+    def test_closed_interval_uses_gte_lte(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, stop=20))
+        qs.filter.assert_called_once()
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(kwargs, {})
+        self.assertEqual(str(q), "(AND: ('price__gte', 10), ('price__lte', 20))")
+
+    def test_open_interval_uses_gt_lt(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, True, 20, True))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('price__gt', 10), ('price__lt', 20))")
+
+    def test_mixed_boundaries(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, stop=20, stop_open=True))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('price__gte', 10), ('price__lt', 20))")
+
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, True, 20))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('price__gt', 10), ('price__lte', 20))")
+
+    def test_half_bounded_start(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, True))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('price__gt', 10))")
+
+    def test_half_bounded_stop(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(None, stop=20, stop_open=True))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('price__lt', 20))")
+
+    def test_unbounded_interval_filters_everything(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval())
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: )")
+
+    def test_empty_interval_positive_returns_none(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, True, 10))
+        qs.none.assert_called_once()
+        qs.filter.assert_not_called()
+
+    def test_empty_interval_exclude_is_noop(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, True, 10), exclude=True)
+        qs.filter.assert_not_called()
+        qs.exclude.assert_not_called()
+
+    def test_exclude_is_strict_about_null_by_default(self):
+        qs = mock.Mock()
+        f = IntervalFilter(field_name="price", exclude=True)
+        f.filter(qs, self.interval(10, True, 20))
+        qs.exclude.assert_called_once()
+        (q,), kwargs = qs.exclude.call_args
+        self.assertEqual(str(q), "(AND: ('price__gt', 10), ('price__lte', 20))")
+        qs.exclude.return_value.filter.assert_called_once_with(price__isnull=False)
+
+    def test_exclude_nullable_keeps_null_rows(self):
+        qs = mock.Mock()
+        f = IntervalFilter(field_name="price", exclude=True, nullable=True)
+        f.filter(qs, self.interval(10, True, 20))
+        qs.exclude.assert_not_called()
+        (q,), kwargs = qs.filter.call_args
+        self.assertTrue(str(q).startswith("(NOT (AND: "))
+
+    def test_distinct(self):
+        qs = mock.Mock()
+        self.filtered(qs, self.interval(10, stop=20), distinct=True)
+        qs.distinct.assert_called_once()
+
+    def test_lookup_expr_is_ignored(self):
+        # comparisons are derived from the boundary flags, never from a string
+        qs = mock.Mock()
+        f = IntervalFilter(field_name="price", lookup_expr="iexact")
+        f.filter(qs, self.interval(10, stop=20))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('price__gte', 10), ('price__lte', 20))")
 
 
 class DateRangeFilterTests(TestCase):

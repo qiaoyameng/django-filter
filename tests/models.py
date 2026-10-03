@@ -109,6 +109,16 @@ class Book(models.Model):
         return self.title
 
 
+class PricedItem(models.Model):
+    """Model with a nullable numeric column for interval filter tests."""
+
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(max_digits=6, decimal_places=2, null=True)
+
+    def __str__(self):
+        return self.name
+
+
 class Place(models.Model):
     name = models.CharField(max_length=100)
 

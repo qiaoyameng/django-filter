@@ -1,3 +1,16 @@
+Version 26.2 (unreleased)
+-------------------------
+
+* Added :class:`~django_filters.filters.IntervalFilter` and
+  :class:`~django_filters.filters.DateIntervalFilter`, together with the
+  reusable :class:`~django_filters.fields.IntervalField`,
+  :class:`~django_filters.fields.DateIntervalField` and
+  :class:`~django_filters.widgets.IntervalWidget`. These filter by a
+  mathematical interval with explicit open/closed boundaries (e.g.
+  ``[10, 20)``), support half-bounded and unbounded intervals, validate
+  reversed and empty boundaries, and provide explicit ``NULL`` handling for
+  ``exclude`` via the ``nullable`` argument.
+
 Version 26.1 (2026-07-11)
 -------------------------
 

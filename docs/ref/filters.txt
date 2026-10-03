@@ -465,6 +465,72 @@ Filters where a value is between two numerical values, or greater than a minimum
     f = F({'price_max': '19'}, queryset=qs)
 
 
+.. class:: IntervalFilter
+
+Filters a numeric value by a mathematical interval with explicit open or
+closed boundaries: ``[10, 20]``, ``[10, 20)``, ``(10, 20]`` and ``(10, 20)``.
+Either endpoint may be omitted for half-bounded (``[10, +inf)``) or unbounded
+intervals. The endpoint values are cleaned by the field's form fields; the
+``gte``/``gt`` and ``lte``/``lt`` lookups are derived from the boundary flags,
+never from a raw lookup string.
+
+The filter renders four inputs, suffixed ``_after``, ``_after_open``,
+``_before`` and ``_before_open``. The boundary selects accept ``open`` to
+exclude the endpoint; any other value (including an empty, omitted one)
+includes it::
+
+    class F(FilterSet):
+        price = IntervalFilter()
+
+        class Meta:
+            model = Book
+            fields = ['price']
+
+    # [10, 20) -- prices greater than or equal to 10 and strictly less than 20
+    f = F({'price_after': '10', 'price_after_open': '',
+           'price_before': '20', 'price_before_open': 'open'})
+
+    # (10, 20] -- prices strictly greater than 10 and less than or equal to 20
+    f = F({'price_after': '10', 'price_after_open': 'open',
+           'price_before': '20', 'price_before_open': ''})
+
+    # [10, +inf) -- a half-bounded interval
+    f = F({'price_after': '10'})
+
+A submitted interval is validated: a reversed interval (start greater than
+stop) and an empty interval (equal endpoints with an open boundary, such as
+``[10, 10)``) are rejected with ``invalid_order`` and ``empty`` errors. If
+neither endpoint is provided, the filter is a no-op.
+
+Rows with a ``NULL`` value never match an interval. When ``exclude=True`` is
+used, ``NULL`` rows are also excluded by default -- note that this is stricter
+than Django's ``QuerySet.exclude``, which normally retains them. Pass
+``nullable=True`` to keep the default Django behavior of including ``NULL``
+rows when excluding::
+
+    # excludes rows inside the interval and keeps rows with a NULL price
+    price = IntervalFilter(exclude=True, nullable=True)
+
+.. class:: DateIntervalFilter
+
+Identical to :class:`~django_filters.filters.IntervalFilter` except that the
+endpoints are cleaned with :class:`~django.forms.DateField` and are suitable
+for :class:`~django.db.models.DateField` columns. A closed boundary includes
+the whole boundary day (from ``00:00:00`` through ``23:59:59.999999``), while
+an open boundary excludes it::
+
+    class F(FilterSet):
+        date = DateIntervalFilter()
+
+        class Meta:
+            model = Comment
+            fields = ['date']
+
+    # Comments made on 2016-01-01 (open stop excludes 2016-01-02)
+    f = F({'date_after': '2016-01-01', 'date_before': '2016-01-02',
+           'date_before_open': 'open'})
+
+
 .. class:: DateRangeFilter
 
 Filter similar to the admin changelist date one, it has a number of common

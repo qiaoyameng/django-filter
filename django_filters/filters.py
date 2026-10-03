@@ -17,8 +17,11 @@ from .fields import (
     BaseCSVField,
     BaseRangeField,
     ChoiceField,
+    DateIntervalField,
     DateRangeField,
     DateTimeRangeField,
+    Interval,
+    IntervalField,
     IsoDateTimeField,
     IsoDateTimeRangeField,
     LookupChoiceField,
@@ -49,6 +52,7 @@ __all__ = [
     "ChoiceFilter",
     "DateFilter",
     "DateFromToRangeFilter",
+    "DateIntervalFilter",
     "DateRangeFilter",
     "DateTimeFilter",
     "DateTimeFromToRangeFilter",
@@ -56,6 +60,7 @@ __all__ = [
     "Filter",
     "IsoDateTimeFilter",
     "IsoDateTimeFromToRangeFilter",
+    "IntervalFilter",
     "LookupChoiceFilter",
     "ModelChoiceFilter",
     "ModelMultipleChoiceFilter",
@@ -437,6 +442,72 @@ class RangeFilter(Filter):
         return super().filter(qs, value)
 
 
+class IntervalFilter(Filter):
+    """
+    Filter a numeric column by a mathematical interval with explicit open or
+    closed boundaries, such as ``[10, 20)`` or ``(10, 20]``. Either endpoint may
+    be omitted for half-bounded or unbounded intervals.
+
+    The compressed value is an
+    :class:`~django_filters.fields.Interval`. Boundary comparisons are built
+    from the cleaned endpoint values with the matching lookups (``gte``/``gt``
+    and ``lte``/``lt``); the lookup expression is never assembled from a raw
+    string.
+
+    NULL semantics
+    --------------
+    Rows with a NULL column value never match an interval. To prevent NULLs
+    from silently leaking into the result set, ``exclude`` also excludes them
+    -- note that this is stricter than Django's ``QuerySet.exclude``, which
+    normally retains NULL rows. Pass ``nullable=True`` to restore the default
+    behavior of including NULL rows when excluding.
+    """
+
+    field_class = IntervalField
+
+    def __init__(self, *args, nullable=False, **kwargs):
+        self.nullable = nullable
+        super().__init__(*args, **kwargs)
+
+    def build_q(self, value):
+        conditions = []
+
+        if value.start is not None and value.start.value is not None:
+            lookup = "gt" if value.start.open else "gte"
+            conditions.append(
+                Q(**{"%s__%s" % (self.field_name, lookup): value.start.value})
+            )
+        if value.stop is not None and value.stop.value is not None:
+            lookup = "lt" if value.stop.open else "lte"
+            conditions.append(
+                Q(**{"%s__%s" % (self.field_name, lookup): value.stop.value})
+            )
+
+        q = Q()
+        for condition in conditions:
+            q &= condition
+        return q
+
+    def filter(self, qs, value):
+        if not isinstance(value, Interval):
+            return qs
+
+        if self.distinct:
+            qs = qs.distinct()
+
+        if value.is_empty:
+            return qs if self.exclude else qs.none()
+
+        q = self.build_q(value)
+        isnull = "%s__isnull" % self.field_name
+
+        if self.exclude:
+            return qs.filter(~q) if self.nullable else qs.exclude(q).filter(
+                **{isnull: False}
+            )
+        return qs.filter(q)
+
+
 def _truncate(dt):
     return dt.date()
 
@@ -523,6 +594,10 @@ class DateRangeFilter(ChoiceFilter):
 
 class DateFromToRangeFilter(RangeFilter):
     field_class = DateRangeField
+
+
+class DateIntervalFilter(IntervalFilter):
+    field_class = DateIntervalField
 
 
 class DateTimeFromToRangeFilter(RangeFilter):

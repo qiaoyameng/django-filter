@@ -12,7 +12,9 @@ from .utils import handle_timezone
 from .widgets import (
     BaseCSVWidget,
     CSVWidget,
+    DateIntervalWidget,
     DateRangeWidget,
+    IntervalWidget,
     LookupChoiceWidget,
     RangeWidget,
 )
@@ -37,6 +39,149 @@ class RangeField(forms.MultiValueField):
         if data_list:
             return slice(*data_list)
         return None
+
+
+class IntervalEndpoint(namedtuple("IntervalEndpoint", ("value", "open"))):
+    """
+    A single interval endpoint.
+
+    * ``value`` -- the cleaned endpoint value, or ``None`` for an unbounded
+      (infinite) endpoint.
+    * ``open`` -- ``True`` for an open boundary (``(``/``)``), ``False`` for a
+      closed boundary (``[``/``]``).
+    """
+
+    def __new__(cls, value, open=False):
+        return super().__new__(cls, value, bool(open))
+
+    @property
+    def included(self):
+        return not self.open
+
+
+class Interval(namedtuple("Interval", ("start", "stop"))):
+    """
+    A mathematical interval with two :class:`IntervalEndpoint` boundaries.
+
+    * ``start``/``stop`` are ``None`` for an unbounded side (e.g.
+      ``(-inf, x)``).
+    * ``is_empty`` is ``True`` for an empty interval, currently only possible
+      when both endpoints are equal and at least one boundary is open, such as
+      ``[10, 10)``.
+    * ``is_unbounded`` is ``True`` when neither endpoint is provided.
+    """
+
+    @property
+    def is_empty(self):
+        if self.start is None or self.stop is None:
+            return False
+        if self.start.value is None or self.stop.value is None:
+            return False
+        return self.start.value == self.stop.value and (
+            self.start.open or self.stop.open
+        )
+
+    @property
+    def is_unbounded(self):
+        start_is_none = self.start is None or self.start.value is None
+        stop_is_none = self.stop is None or self.stop.value is None
+        return start_is_none and stop_is_none
+
+
+class IntervalField(forms.MultiValueField):
+    """
+    Reusable field for a bounded, half-bounded or unbounded interval with
+    explicit open/closed boundaries, e.g. ``[10, 20)`` or ``(10, 20]``.
+
+    Endpoints are cleaned by the corresponding form fields (numbers by
+    default), never by parsing a string lookup expression. The compressed
+    value is an :class:`Interval` of :class:`IntervalEndpoint` instances, or
+    ``None`` when no interval data was provided.
+    """
+
+    widget = IntervalWidget
+
+    default_error_messages = {
+        "invalid_order": _("Start value must be less than or equal to end value."),
+        "empty": _("This interval is empty."),
+    }
+
+    def __init__(self, fields=None, *args, **kwargs):
+        if fields is None:
+            fields = (forms.DecimalField(), forms.DecimalField())
+        fields = (
+            fields[0],
+            forms.BooleanField(required=False),
+            fields[1],
+            forms.BooleanField(required=False),
+        )
+        super().__init__(fields, *args, **kwargs)
+
+    def compress(self, data_list):
+        if not data_list:
+            return None
+        start_value, start_open, stop_value, stop_open = data_list
+
+        start_empty = start_value in EMPTY_VALUES
+        stop_empty = stop_value in EMPTY_VALUES
+
+        if start_empty and stop_empty:
+            return None
+
+        if start_empty:
+            start = None
+        else:
+            start = self.build_start(start_value, bool(start_open))
+        stop = None if stop_empty else self.build_stop(stop_value, bool(stop_open))
+
+        interval = Interval(start, stop)
+        self.validate_interval(interval, start_value, stop_value)
+        return interval
+
+    def build_start(self, value, open):
+        return IntervalEndpoint(value, open)
+
+    def build_stop(self, value, open):
+        return IntervalEndpoint(value, open)
+
+    def validate_interval(self, interval, start_value, stop_value):
+        if interval.start is None or interval.stop is None:
+            return
+        if start_value > stop_value:
+            raise forms.ValidationError(
+                self.error_messages["invalid_order"], code="invalid_order"
+            )
+        if start_value == stop_value and (
+            interval.start.open or interval.stop.open
+        ):
+            raise forms.ValidationError(
+                self.error_messages["empty"], code="empty"
+            )
+
+
+class DateIntervalField(IntervalField):
+    """
+    IntervalField for :class:`~django.forms.DateField` endpoints.
+
+    A closed boundary includes the whole boundary day (``time.min`` for the
+    start, ``time.max`` for the stop), while an open boundary excludes it.
+    """
+
+    widget = DateIntervalWidget
+
+    def __init__(self, *args, **kwargs):
+        fields = (forms.DateField(), forms.DateField())
+        super().__init__(fields, *args, **kwargs)
+
+    def build_start(self, value, open):
+        if not open:
+            value = handle_timezone(datetime.combine(value, time.min), False)
+        return IntervalEndpoint(value, open)
+
+    def build_stop(self, value, open):
+        if not open:
+            value = handle_timezone(datetime.combine(value, time.max), False)
+        return IntervalEndpoint(value, open)
 
 
 class DateRangeField(RangeField):

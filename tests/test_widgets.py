@@ -1,11 +1,14 @@
-from django.forms import NumberInput, Select, TextInput
+from django.forms import DateInput, NumberInput, Select, TextInput
 from django.http import QueryDict
 from django.test import TestCase
 
 from django_filters.widgets import (
     BaseCSVWidget,
+    BoundaryWidget,
     BooleanWidget,
     CSVWidget,
+    DateIntervalWidget,
+    IntervalWidget,
     LinkWidget,
     LookupChoiceWidget,
     QueryArrayWidget,
@@ -307,6 +310,57 @@ class RangeWidgetTests(TestCase):
             -
             <input type="date" name="date_max" />""",
         )
+
+
+class BoundaryWidgetTests(TestCase):
+    def test_choices(self):
+        w = BoundaryWidget()
+        values = [choice[0] for choice in w.choices]
+        self.assertEqual(values, [BoundaryWidget.CLOSED, BoundaryWidget.OPEN])
+
+    def test_value_from_datadict(self):
+        w = BoundaryWidget()
+        self.assertEqual(
+            w.value_from_datadict(QueryDict("p=open"), None, "p"),
+            BoundaryWidget.OPEN,
+        )
+        self.assertEqual(
+            w.value_from_datadict(QueryDict("p="), None, "p"),
+            BoundaryWidget.CLOSED,
+        )
+        # an absent parameter is distinguishable from an explicit closed choice
+        self.assertIsNone(w.value_from_datadict(QueryDict(""), None, "p"))
+
+
+class IntervalWidgetTests(TestCase):
+    def test_widget(self):
+        w = IntervalWidget()
+        self.assertEqual(len(w.widgets), 4)
+        self.assertEqual(
+            w.suffixes, ["after", "after_open", "before", "before_open"]
+        )
+
+    def test_value_from_datadict(self):
+        w = IntervalWidget()
+        data = QueryDict(
+            "price_after=10&price_after_open=open"
+            "&price_before=20&price_before_open="
+        )
+        self.assertEqual(
+            w.value_from_datadict(data, None, "price"),
+            ["10", BoundaryWidget.OPEN, "20", BoundaryWidget.CLOSED],
+        )
+
+    def test_decompress_none(self):
+        w = IntervalWidget()
+        self.assertEqual(
+            w.decompress(None),
+            [None, BoundaryWidget.CLOSED, None, BoundaryWidget.CLOSED],
+        )
+
+    def test_date_widget_uses_date_inputs(self):
+        w = DateIntervalWidget()
+        self.assertIsInstance(w.widgets[0], DateInput)
 
 
 class BooleanWidgetTests(TestCase):

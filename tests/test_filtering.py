@@ -1,6 +1,7 @@
 import contextlib
 import datetime
 import unittest
+from decimal import Decimal
 from operator import attrgetter
 from unittest import mock
 
@@ -18,9 +19,11 @@ from django_filters.filters import (
     CharFilter,
     ChoiceFilter,
     DateFromToRangeFilter,
+    DateIntervalFilter,
     DateRangeFilter,
     DateTimeFromToRangeFilter,
     DurationFilter,
+    IntervalFilter,
     IsoDateTimeFromToRangeFilter,
     LookupChoiceFilter,
     ModelChoiceFilter,
@@ -45,6 +48,7 @@ from .models import (
     DirectedNode,
     Location,
     Node,
+    PricedItem,
     Profile,
     SpacewalkRecord,
     User,
@@ -712,6 +716,203 @@ class NumberFilterTests(TestCase):
 
         f = F({"price": 10}, queryset=Book.objects.all())
         self.assertQuerySetEqual(f.qs, ["Ender's Game"], lambda o: o.title)
+
+
+class IntervalFilterTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        # values on both sides of the boundaries, the endpoints themselves,
+        # an interior value and a NULL row
+        for name, price in {
+            "below": "5",
+            "start": "10",
+            "middle": "15",
+            "end": "20",
+            "above": "25",
+        }.items():
+            PricedItem.objects.create(name=name, price=price)
+        PricedItem.objects.create(name="null", price=None)
+
+    def data(self, start_open=False, stop_open=False):
+        return {
+            "price_after": "10",
+            "price_after_open": "open" if start_open else "",
+            "price_before": "20",
+            "price_before_open": "open" if stop_open else "",
+        }
+
+    def filter(self, data, **kwargs):
+        class F(FilterSet):
+            price = IntervalFilter(**kwargs)
+
+            class Meta:
+                model = PricedItem
+                fields = []
+
+        return set(F(data).qs.values_list("price", flat=True))
+
+    def test_closed_closed(self):
+        # [10, 20] -- both endpoints included
+        self.assertEqual(
+            self.filter(self.data()),
+            {Decimal("10"), Decimal("15"), Decimal("20")},
+        )
+
+    def test_closed_open(self):
+        # [10, 20) -- stop excluded
+        self.assertEqual(
+            self.filter(self.data(stop_open=True)),
+            {Decimal("10"), Decimal("15")},
+        )
+
+    def test_open_closed(self):
+        # (10, 20] -- start excluded
+        self.assertEqual(
+            self.filter(self.data(start_open=True)),
+            {Decimal("15"), Decimal("20")},
+        )
+
+    def test_open_open(self):
+        # (10, 20) -- both endpoints excluded, interior remains
+        self.assertEqual(
+            self.filter(self.data(start_open=True, stop_open=True)),
+            {Decimal("15")},
+        )
+
+    def test_null_never_matches_positive_filter(self):
+        result = self.filter(self.data())
+        self.assertNotIn(None, result)
+
+    def test_exclude_drops_null_by_default(self):
+        result = self.filter(self.data(), exclude=True)
+        self.assertEqual(result, {Decimal("5"), Decimal("25")})
+        self.assertNotIn(None, result)
+
+    def test_exclude_nullable_keeps_null(self):
+        result = self.filter(self.data(), exclude=True, nullable=True)
+        self.assertEqual(result, {None, Decimal("5"), Decimal("25")})
+
+    def test_half_bounded_start(self):
+        data = {"price_after": "20", "price_after_open": "open"}
+        self.assertEqual(
+            self.filter(data), {Decimal("25")}
+        )
+
+    def test_half_bounded_stop(self):
+        data = {"price_before": "20", "price_before_open": ""}
+        self.assertEqual(
+            self.filter(data), {Decimal("5"), Decimal("10"), Decimal("15"), Decimal("20")}
+        )
+
+    def test_no_interval_is_noop(self):
+        class F(FilterSet):
+            price = IntervalFilter()
+
+            class Meta:
+                model = PricedItem
+                fields = []
+
+        self.assertEqual(F({}).qs.count(), PricedItem.objects.count())
+
+    def test_reversed_boundaries_is_invalid(self):
+        class F(FilterSet):
+            price = IntervalFilter()
+
+            class Meta:
+                model = PricedItem
+                fields = []
+
+        f = F({"price_after": "20", "price_before": "10"})
+        self.assertFalse(f.is_valid())
+        self.assertIn("price", f.errors)
+
+    def test_equal_open_boundaries_is_invalid(self):
+        class F(FilterSet):
+            price = IntervalFilter()
+
+            class Meta:
+                model = PricedItem
+                fields = []
+
+        f = F(
+            {
+                "price_after": "10",
+                "price_after_open": "open",
+                "price_before": "10",
+                "price_before_open": "",
+            }
+        )
+        self.assertFalse(f.is_valid())
+        self.assertIn("price", f.errors)
+
+
+class DateIntervalFilterTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create(username="interval-user")
+        cls.dates = [
+            datetime.date(2020, 1, 1),
+            datetime.date(2020, 1, 2),
+            datetime.date(2020, 1, 3),
+        ]
+        for day in cls.dates:
+            Comment.objects.create(
+                text="c", author=cls.user, date=day, time=datetime.time(12)
+            )
+
+    def data(self, start, start_open, stop, stop_open):
+        return {
+            "date_after": start,
+            "date_after_open": "open" if start_open else "",
+            "date_before": stop,
+            "date_before_open": "open" if stop_open else "",
+        }
+
+    def filter(self, data):
+        class F(FilterSet):
+            date = DateIntervalFilter()
+
+            class Meta:
+                model = Comment
+                fields = ["date"]
+
+        return set(F(data).qs.values_list("date", flat=True))
+
+    def test_closed_closed(self):
+        self.assertEqual(
+            self.filter(self.data("2020-01-01", False, "2020-01-02", False)),
+            {datetime.date(2020, 1, 1), datetime.date(2020, 1, 2)},
+        )
+
+    def test_closed_open(self):
+        self.assertEqual(
+            self.filter(self.data("2020-01-01", False, "2020-01-02", True)),
+            {datetime.date(2020, 1, 1)},
+        )
+
+    def test_open_closed(self):
+        self.assertEqual(
+            self.filter(self.data("2020-01-01", True, "2020-01-02", False)),
+            {datetime.date(2020, 1, 2)},
+        )
+
+    def test_open_open(self):
+        self.assertEqual(
+            self.filter(self.data("2020-01-01", True, "2020-01-03", True)),
+            {datetime.date(2020, 1, 2)},
+        )
+
+    def test_half_bounded(self):
+        # open start: dates strictly after 2020-01-01
+        self.assertEqual(
+            self.filter(self.data("2020-01-01", True, "", False)),
+            {datetime.date(2020, 1, 2), datetime.date(2020, 1, 3)},
+        )
+        # closed stop: dates up to and including 2020-01-02
+        self.assertEqual(
+            self.filter(self.data("", False, "2020-01-02", False)),
+            {datetime.date(2020, 1, 1), datetime.date(2020, 1, 2)},
+        )
 
 
 class RangeFilterTests(TestCase):
