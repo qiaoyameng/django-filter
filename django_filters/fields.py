@@ -12,7 +12,9 @@ from .utils import handle_timezone
 from .widgets import (
     BaseCSVWidget,
     CSVWidget,
+    DateIntervalWidget,
     DateRangeWidget,
+    IntervalWidget,
     LookupChoiceWidget,
     RangeWidget,
 )
@@ -79,6 +81,168 @@ class IsoDateTimeRangeField(RangeField):
 
 class TimeRangeField(RangeField):
     widget = DateRangeWidget
+
+    def __init__(self, *args, **kwargs):
+        fields = (forms.TimeField(), forms.TimeField())
+        super().__init__(fields, *args, **kwargs)
+
+
+class Interval(namedtuple("Interval", ("start", "stop", "start_inclusive",
+                                       "stop_inclusive"))):
+    """
+    A mathematical interval with explicit, independently controllable
+    boundaries.
+
+    * ``start``/``stop`` are the cleaned endpoint values, or ``None`` when the
+      endpoint is unbounded (infinite).
+    * ``start_inclusive``/``stop_inclusive`` determine whether an endpoint is
+      included (``[a, b]``) or excluded (``(a, b)``).
+
+    ``None`` itself represents "no interval provided", while a fully populated
+    :class:`Interval` with two finite endpoints that contain no values (a
+    reversed interval, or an open interval whose endpoints are equal) is an
+    *empty* interval, detected by :attr:`is_empty`.
+    """
+
+    def __new__(cls, start, stop, start_inclusive=True, stop_inclusive=True):
+        return super().__new__(
+            cls, start, stop, start_inclusive, stop_inclusive
+        )
+
+    @property
+    def is_finite(self):
+        return self.start is not None and self.stop is not None
+
+    @property
+    def is_empty(self):
+        """Return ``True`` when a bounded interval cannot contain any value."""
+        if not self.is_finite:
+            return False
+        if self.start > self.stop:
+            return True
+        if self.start == self.stop and not (
+            self.start_inclusive and self.stop_inclusive
+        ):
+            return True
+        return False
+
+
+class IntervalField(forms.MultiValueField):
+    """
+    Reusable field representing a half-open, open, closed or unbounded
+    interval. The endpoints are cleaned by the two provided form fields, so
+    the same machinery serves numeric, date and datetime lookups.
+
+    The cleaned value is an :class:`Interval`, or ``None`` when no endpoint is
+    provided.
+    """
+
+    widget = IntervalWidget
+
+    default_error_messages = {
+        "reversed": _("The lower bound must be less than or equal to the "
+                     "upper bound."),
+        "empty": _("This interval is empty; an open boundary cannot equal "
+                   "the other boundary."),
+    }
+
+    def __init__(self, fields=None, *args, **kwargs):
+        if fields is None:
+            fields = (forms.DecimalField(), forms.DecimalField())
+
+        bounds_start = forms.ChoiceField(
+            choices=(("[", _("inclusive")), ("(", _("exclusive"))),
+            required=False,
+        )
+        bounds_stop = forms.ChoiceField(
+            choices=(("]", _("inclusive")), (")", _("exclusive"))),
+            required=False,
+        )
+        # (lower boundary, lower value, upper value, upper boundary)
+        fields = (bounds_start, fields[0], fields[1], bounds_stop)
+        super().__init__(fields, *args, **kwargs)
+
+    def compress(self, data_list):
+        if not data_list:
+            return None
+
+        bounds_start, start, stop, bounds_stop = data_list
+        if start is None and stop is None:
+            return None
+
+        # An omitted boundary selector defaults to an inclusive endpoint.
+        return Interval(
+            start=start,
+            stop=stop,
+            start_inclusive=bounds_start != "(",
+            stop_inclusive=bounds_stop != ")",
+        )
+
+    def validate(self, interval):
+        super().validate(interval)
+        if interval is None:
+            return
+        if interval.is_finite and interval.start > interval.stop:
+            raise forms.ValidationError(
+                self.error_messages["reversed"], code="reversed"
+            )
+        if interval.is_finite and interval.start == interval.stop and not (
+            interval.start_inclusive and interval.stop_inclusive
+        ):
+            raise forms.ValidationError(
+                self.error_messages["empty"], code="empty"
+            )
+
+
+class DateIntervalField(IntervalField):
+    widget = DateIntervalWidget
+
+    def __init__(self, *args, **kwargs):
+        fields = (forms.DateField(), forms.DateField())
+        super().__init__(fields, *args, **kwargs)
+
+    def compress(self, data_list):
+        interval = super().compress(data_list)
+        if interval is None:
+            return None
+
+        start = interval.start
+        stop = interval.stop
+        if start is not None:
+            start = handle_timezone(datetime.combine(start, time.min), False)
+        if stop is not None:
+            # An inclusive upper date contains every instant of that day,
+            # while an exclusive one ends as the day begins.
+            end_time = time.max if interval.stop_inclusive else time.min
+            stop = handle_timezone(
+                datetime.combine(interval.stop, end_time), False
+            )
+        return Interval(
+            start,
+            stop,
+            interval.start_inclusive,
+            interval.stop_inclusive,
+        )
+
+
+class DateTimeIntervalField(IntervalField):
+    widget = DateIntervalWidget
+
+    def __init__(self, *args, **kwargs):
+        fields = (forms.DateTimeField(), forms.DateTimeField())
+        super().__init__(fields, *args, **kwargs)
+
+
+class IsoDateTimeIntervalField(IntervalField):
+    widget = DateIntervalWidget
+
+    def __init__(self, *args, **kwargs):
+        fields = (IsoDateTimeField(), IsoDateTimeField())
+        super().__init__(fields, *args, **kwargs)
+
+
+class TimeIntervalField(IntervalField):
+    widget = DateIntervalWidget
 
     def __init__(self, *args, **kwargs):
         fields = (forms.TimeField(), forms.TimeField())

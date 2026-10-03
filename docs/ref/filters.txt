@@ -465,6 +465,61 @@ Filters where a value is between two numerical values, or greater than a minimum
     f = F({'price_max': '19'}, queryset=qs)
 
 
+.. class:: IntervalFilter
+
+Filters by a mathematical interval whose endpoint inclusion is controllable,
+supporting ``[a, b]``, ``(a, b)``, ``[a, b)`` and ``(a, b]`` as well as
+unbounded (infinite) endpoints. The endpoints are cleaned by the two inner
+form fields rather than being assembled into a lookup string, so numeric and
+date based columns share the same implementation. ::
+
+    class F(FilterSet):
+        price = IntervalFilter()
+
+        class Meta:
+            model = Book
+            fields = ['price']
+
+    qs = Book.objects.all()
+
+    # Half-open [10, 20)
+    f = F({
+        'price_bounds_start': '[',
+        'price_start': '10',
+        'price_stop': '20',
+        'price_bounds_stop': ')',
+    }, queryset=qs)
+
+    # Unbounded upper endpoint [10, +inf)
+    f = F({'price_bounds_start': '[', 'price_start': '10'}, queryset=qs)
+
+The four query parameters are ``<name>_bounds_start``, ``<name>_start``,
+``<name>_stop`` and ``<name>_bounds_stop``. A boundary selector accepts ``[``
+or ``(`` for the lower endpoint and ``]`` or ``)`` for the upper one; if a
+selector is omitted the corresponding endpoint is treated as inclusive.
+Providing neither endpoint disables the filter. Reversed intervals and open
+intervals whose endpoints are equal are rejected by field validation.
+
+``IntervalFilter`` exposes this option in addition to the common filter
+arguments (``field_name``, ``lookup_expr``, ``exclude`` and so on):
+
+``nullable``
+""""""""""""
+
+Defaults to ``False``. When ``False``, rows whose filtered column is ``NULL``
+never match the interval and -- importantly -- are never returned when the
+filter uses ``exclude=True``. This avoids ``NULL`` rows leaking into an
+``exclude`` result set due to SQL's three-valued logic. Set ``nullable=True``
+to leave ``NULL`` handling to the database, under which ``exclude`` returns
+``NULL`` rows as values that do not match the interval.
+
+Date, datetime, ISO 8601 datetime and time columns use the matching
+``DateIntervalFilter``, ``DateTimeIntervalFilter``,
+``IsoDateTimeIntervalFilter`` and ``TimeIntervalFilter``. ``DateIntervalFilter``
+treats an inclusive upper date as the end of that day (``23:59:59.999999``)
+and an exclusive one as the beginning of that day.
+
+
 .. class:: DateRangeFilter
 
 Filter similar to the admin changelist date one, it has a number of common

@@ -13,16 +13,26 @@ from django_filters.fields import (
     BaseCSVField,
     BaseRangeField,
     ChoiceField,
+    DateIntervalField,
     DateRangeField,
+    DateTimeIntervalField,
     DateTimeRangeField,
+    Interval,
+    IntervalField,
     IsoDateTimeField,
     IsoDateTimeRangeField,
     Lookup,
     LookupChoiceField,
     RangeField,
+    TimeIntervalField,
     TimeRangeField,
 )
-from django_filters.widgets import BaseCSVWidget, CSVWidget, RangeWidget
+from django_filters.widgets import (
+    BaseCSVWidget,
+    CSVWidget,
+    IntervalWidget,
+    RangeWidget,
+)
 
 
 def to_d(float_value):
@@ -130,6 +140,137 @@ class TimeRangeFieldTests(TestCase):
         self.assertEqual(
             f.clean(["10:15", "12:30"]), slice(time(10, 15, 0), time(12, 30, 0))
         )
+
+
+class IntervalFieldTests(TestCase):
+    def test_field(self):
+        f = IntervalField()
+        self.assertEqual(len(f.fields), 4)
+        self.assertIsInstance(f.widget, IntervalWidget)
+
+    def test_no_interval_provided_returns_none(self):
+        f = IntervalField(required=False)
+        self.assertIsNone(f.clean([]))
+        self.assertIsNone(f.clean(["", "", "", ""]))
+
+    def test_closed_closed(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["[", "10", "20", "]"]),
+            Interval(to_d(10), to_d(20), True, True),
+        )
+
+    def test_open_open(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["(", "10", "20", ")"]),
+            Interval(to_d(10), to_d(20), False, False),
+        )
+
+    def test_half_open_combinations(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["[", "10", "20", ")"]),
+            Interval(to_d(10), to_d(20), True, False),
+        )
+        self.assertEqual(
+            f.clean(["(", "10", "20", "]"]),
+            Interval(to_d(10), to_d(20), False, True),
+        )
+
+    def test_omitted_boundary_selectors_default_to_inclusive(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["", "10", "20", ""]),
+            Interval(to_d(10), to_d(20), True, True),
+        )
+
+    def test_unbounded_start(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["", "", "20", ")"]),
+            Interval(None, to_d(20), True, False),
+        )
+
+    def test_unbounded_stop(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["(", "10", "", ""]),
+            Interval(to_d(10), None, False, True),
+        )
+
+    def test_equal_endpoints_closed_is_valid(self):
+        f = IntervalField(required=False)
+        self.assertEqual(
+            f.clean(["[", "10", "10", "]"]),
+            Interval(to_d(10), to_d(10), True, True),
+        )
+
+    def test_equal_endpoints_open_is_empty(self):
+        f = IntervalField(required=False)
+        with self.assertRaises(forms.ValidationError) as ctx:
+            f.clean(["(", "10", "10", "]"])
+        self.assertEqual(ctx.exception.error_list[0].code, "empty")
+
+        with self.assertRaises(forms.ValidationError) as ctx:
+            f.clean(["[", "10", "10", ")"])
+        self.assertEqual(ctx.exception.error_list[0].code, "empty")
+
+    def test_reversed_bounds(self):
+        f = IntervalField(required=False)
+        with self.assertRaises(forms.ValidationError) as ctx:
+            f.clean(["[", "20", "10", "]"])
+        self.assertEqual(ctx.exception.error_list[0].code, "reversed")
+
+
+class DateIntervalFieldTests(TestCase):
+    def test_field(self):
+        f = DateIntervalField()
+        self.assertEqual(len(f.fields), 4)
+
+    @override_settings(USE_TZ=False)
+    def test_clean_half_open(self):
+        f = DateIntervalField(required=False)
+        interval = f.clean(["[", "2015-01-01", "2015-01-10", ")"])
+        self.assertEqual(interval.start, datetime(2015, 1, 1, 0, 0, 0))
+        self.assertEqual(interval.stop, datetime(2015, 1, 10, 0, 0, 0))
+        self.assertTrue(interval.start_inclusive)
+        self.assertFalse(interval.stop_inclusive)
+
+    @override_settings(USE_TZ=False)
+    def test_clean_closed_upper_spans_full_day(self):
+        f = DateIntervalField(required=False)
+        interval = f.clean(["[", "2015-01-01", "2015-01-10", "]"])
+        self.assertEqual(
+            interval.stop, datetime(2015, 1, 10, 23, 59, 59, 999999)
+        )
+
+    def test_no_interval(self):
+        f = DateIntervalField(required=False)
+        self.assertIsNone(f.clean([]))
+
+
+class DateTimeIntervalFieldTests(TestCase):
+    @override_settings(USE_TZ=False)
+    def test_clean(self):
+        f = DateTimeIntervalField(required=False)
+        interval = f.clean(
+            ["(", "2015-01-01 10:30", "2015-01-10 8:45", "]"]
+        )
+        self.assertEqual(interval.start, datetime(2015, 1, 1, 10, 30))
+        self.assertEqual(interval.stop, datetime(2015, 1, 10, 8, 45))
+        self.assertFalse(interval.start_inclusive)
+        self.assertTrue(interval.stop_inclusive)
+
+
+class TimeIntervalFieldTests(TestCase):
+    def test_clean(self):
+        f = TimeIntervalField(required=False)
+        interval = f.clean(["[", "10:15", "12:30", ")"])
+        self.assertEqual(interval.start, time(10, 15))
+        self.assertEqual(interval.stop, time(12, 30))
+        self.assertTrue(interval.start_inclusive)
+        self.assertFalse(interval.stop_inclusive)
 
 
 class LookupChoiceFieldTests(TestCase):

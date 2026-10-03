@@ -210,3 +210,16 @@ class SpacewalkRecord(models.Model):
 
     astronaut = models.CharField(max_length=100)
     duration = models.DurationField()
+
+
+class IntervalItem(models.Model):
+    """Data for interval filtering, including a NULL endpoint column."""
+
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(
+        max_digits=6, decimal_places=2, null=True, blank=True
+    )
+    recorded = models.DateField(null=True, blank=True)
+
+    def __str__(self):
+        return self.name

@@ -6,6 +6,7 @@ from unittest import mock
 
 import django
 from django import forms
+from django.db.models import Q
 from django.test import TestCase, override_settings
 from django.utils import translation
 from django.utils.translation import gettext as _
@@ -13,11 +14,15 @@ from django.utils.translation import gettext as _
 from django_filters import filters, widgets
 from django_filters.fields import (
     BaseCSVField,
+    DateIntervalField,
     DateRangeField,
     DateTimeRangeField,
+    Interval,
+    IntervalField,
     IsoDateTimeRangeField,
     Lookup,
     RangeField,
+    TimeIntervalField,
     TimeRangeField,
 )
 from django_filters.filters import (
@@ -30,12 +35,16 @@ from django_filters.filters import (
     ChoiceFilter,
     DateFilter,
     DateFromToRangeFilter,
+    DateIntervalFilter,
     DateRangeFilter,
     DateTimeFilter,
     DateTimeFromToRangeFilter,
+    DateTimeIntervalFilter,
     DurationFilter,
     Filter,
+    IsoDateTimeIntervalFilter,
     IsoDateTimeFromToRangeFilter,
+    IntervalFilter,
     LookupChoiceFilter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
@@ -45,6 +54,7 @@ from django_filters.filters import (
     OrderingFilter,
     RangeFilter,
     TimeFilter,
+    TimeIntervalFilter,
     TimeRangeFilter,
     TypedMultipleChoiceFilter,
     UUIDFilter,
@@ -1063,6 +1073,112 @@ class RangeFilterTests(TestCase):
         f.filter(qs, mock.Mock(start=None, stop=30))
         qs.distinct.assert_called_once()
         qs.distinct.return_value.filter.assert_called_once_with(None__lte=30)
+
+
+class IntervalFilterTests(TestCase):
+    def test_default_field(self):
+        f = IntervalFilter()
+        self.assertIsInstance(f.field, IntervalField)
+
+    def test_typed_fields(self):
+        self.assertIsInstance(DateIntervalFilter().field, DateIntervalField)
+        self.assertIsInstance(
+            DateTimeIntervalFilter().field,
+            filters.DateTimeIntervalFilter.field_class,
+        )
+        self.assertIsInstance(
+            IsoDateTimeIntervalFilter().field,
+            filters.IsoDateTimeIntervalFilter.field_class,
+        )
+        self.assertIsInstance(TimeIntervalFilter().field, TimeIntervalField)
+
+    def assert_q_equal(self, qs, expected):
+        called = qs.filter.call_args.args[0]
+        self.assertEqual(set(called.children), set(expected.children))
+
+    def test_filter_closed_closed(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter(field_name="price")
+        f.filter(qs, Interval(10, 20, True, True))
+        self.assert_q_equal(
+            qs, Q(price__gte=10, price__lte=20, price__isnull=False)
+        )
+
+    def test_filter_open_open(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter(field_name="price")
+        f.filter(qs, Interval(10, 20, False, False))
+        self.assert_q_equal(
+            qs, Q(price__gt=10, price__lt=20, price__isnull=False)
+        )
+
+    def test_filter_half_open(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter(field_name="price")
+        f.filter(qs, Interval(10, 20, True, False))
+        self.assert_q_equal(
+            qs, Q(price__gte=10, price__lt=20, price__isnull=False)
+        )
+
+        qs = mock.Mock(spec=["filter"])
+        f.filter(qs, Interval(10, 20, False, True))
+        self.assert_q_equal(
+            qs, Q(price__gt=10, price__lte=20, price__isnull=False)
+        )
+
+    def test_filter_unbounded_start(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter(field_name="price")
+        f.filter(qs, Interval(None, 20, True, False))
+        self.assert_q_equal(qs, Q(price__lt=20, price__isnull=False))
+
+    def test_filter_unbounded_stop(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter(field_name="price")
+        f.filter(qs, Interval(10, None, False, True))
+        self.assert_q_equal(qs, Q(price__gt=10, price__isnull=False))
+
+    def test_filtering_skipped_with_none_value(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter()
+        self.assertEqual(qs, f.filter(qs, None))
+
+    def test_exclude_guards_against_null(self):
+        qs = mock.Mock(spec=["filter", "exclude"])
+        f = IntervalFilter(field_name="price", exclude=True)
+        f.filter(qs, Interval(10, 20, True, False))
+        guarded = qs.filter.call_args.args[0]
+        self.assertEqual(set(guarded.children), {("price__isnull", False)})
+        excluded = qs.filter.return_value.exclude.call_args.args[0]
+        self.assertEqual(
+            set(excluded.children),
+            {("price__gte", 10), ("price__lt", 20)},
+        )
+
+    def test_nullable_does_not_guard_null(self):
+        qs = mock.Mock(spec=["filter"])
+        f = IntervalFilter(field_name="price", nullable=True)
+        f.filter(qs, Interval(10, 20, True, False))
+        called = qs.filter.call_args.args[0]
+        self.assertEqual(
+            set(called.children),
+            {("price__gte", 10), ("price__lt", 20)},
+        )
+
+        qs = mock.Mock(spec=["exclude"])
+        f = IntervalFilter(field_name="price", nullable=True, exclude=True)
+        f.filter(qs, Interval(10, 20, True, False))
+        called = qs.exclude.call_args.args[0]
+        self.assertEqual(
+            set(called.children),
+            {("price__gte", 10), ("price__lt", 20)},
+        )
+
+    def test_distinct(self):
+        f = IntervalFilter(field_name="price", distinct=True)
+        qs = mock.Mock()
+        f.filter(qs, Interval(10, 20, True, True))
+        qs.distinct.assert_called_once()
 
 
 class DateRangeFilterTests(TestCase):

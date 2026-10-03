@@ -18,10 +18,12 @@ from django_filters.filters import (
     CharFilter,
     ChoiceFilter,
     DateFromToRangeFilter,
+    DateIntervalFilter,
     DateRangeFilter,
     DateTimeFromToRangeFilter,
     DurationFilter,
     IsoDateTimeFromToRangeFilter,
+    IntervalFilter,
     LookupChoiceFilter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
@@ -43,6 +45,7 @@ from .models import (
     Comment,
     Company,
     DirectedNode,
+    IntervalItem,
     Location,
     Node,
     Profile,
@@ -763,6 +766,211 @@ class RangeFilterTests(TestCase):
         self.assertQuerySetEqual(f.qs, ["Free Book", "Refund"], lambda o: o.title)
         f = F({"price_min": "0", "price_max": "0"}, queryset=qs)
         self.assertQuerySetEqual(f.qs, ["Free Book"], lambda o: o.title)
+
+
+class IntervalFilterTests(TestCase):
+    """
+    SQLite integration tests. The data holds both endpoints, interior values
+    and a NULL so every boundary combination can be checked against real SQL.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.below = IntervalItem.objects.create(name="below", price="5.00")
+        cls.start = IntervalItem.objects.create(name="start", price="10.00")
+        cls.inner = IntervalItem.objects.create(name="inner", price="15.00")
+        cls.stop = IntervalItem.objects.create(name="stop", price="20.00")
+        cls.above = IntervalItem.objects.create(name="above", price="25.00")
+        cls.null = IntervalItem.objects.create(name="null", price=None)
+
+    ALL = ["above", "below", "inner", "null", "start", "stop"]
+
+    def filterset(self, data, **kwargs):
+        class F(FilterSet):
+            price = IntervalFilter(field_name="price", **kwargs)
+
+            class Meta:
+                model = IntervalItem
+                fields = ["price"]
+
+        return F(data, queryset=IntervalItem.objects.all())
+
+    def names(self, data, **kwargs):
+        f = self.filterset(data, **kwargs)
+        self.assertFalse(
+            f.form.errors, [e for field in f.form.errors.values() for e in field]
+        )
+        return list(f.qs.order_by("name").values_list("name", flat=True))
+
+    def test_no_interval_is_noop(self):
+        self.assertEqual(self.names({}), self.ALL)
+
+    def test_closed_closed(self):
+        # [10, 20]
+        data = {
+            "price_bounds_start": "[",
+            "price_start": "10",
+            "price_stop": "20",
+            "price_bounds_stop": "]",
+        }
+        self.assertEqual(self.names(data), ["inner", "start", "stop"])
+
+    def test_closed_open(self):
+        # [10, 20)
+        data = {
+            "price_bounds_start": "[",
+            "price_start": "10",
+            "price_stop": "20",
+            "price_bounds_stop": ")",
+        }
+        self.assertEqual(self.names(data), ["inner", "start"])
+
+    def test_open_closed(self):
+        # (10, 20]
+        data = {
+            "price_bounds_start": "(",
+            "price_start": "10",
+            "price_stop": "20",
+            "price_bounds_stop": "]",
+        }
+        self.assertEqual(self.names(data), ["inner", "stop"])
+
+    def test_open_open(self):
+        # (10, 20)
+        data = {
+            "price_bounds_start": "(",
+            "price_start": "10",
+            "price_stop": "20",
+            "price_bounds_stop": ")",
+        }
+        self.assertEqual(self.names(data), ["inner"])
+
+    def test_unbounded_endpoints(self):
+        data = {
+            "price_bounds_start": "[",
+            "price_start": "10",
+            "price_bounds_stop": "]",
+        }
+        self.assertEqual(self.names(data), ["above", "inner", "start", "stop"])
+
+        data = {
+            "price_start": "10",
+            "price_bounds_stop": ")",
+        }
+        # No upper endpoint supplied: the stray upper selector is ignored,
+        # leaving a closed lower bound [10, +inf).
+        self.assertEqual(self.names(data), ["above", "inner", "start", "stop"])
+
+        data = {
+            "price_stop": "20",
+            "price_bounds_start": "(",
+            "price_bounds_stop": "]",
+        }
+        # No lower endpoint supplied: (-inf, 20].
+        self.assertEqual(self.names(data), ["below", "inner", "start", "stop"])
+
+    def test_null_excluded_from_positive_filter(self):
+        data = {
+            "price_start": "0",
+            "price_bounds_start": "[",
+            "price_bounds_stop": "]",
+        }
+        self.assertNotIn("null", self.names(data))
+
+    def test_null_excluded_from_exclude(self):
+        data = {
+            "price_bounds_start": "[",
+            "price_start": "10",
+            "price_stop": "20",
+            "price_bounds_stop": "]",
+        }
+        result = self.names(data, exclude=True)
+        self.assertEqual(result, ["above", "below"])
+
+    def test_nullable_exclude_keeps_null(self):
+        data = {
+            "price_bounds_start": "[",
+            "price_start": "10",
+            "price_stop": "20",
+            "price_bounds_stop": "]",
+        }
+        result = self.names(data, exclude=True, nullable=True)
+        self.assertEqual(result, ["above", "below", "null"])
+
+    def test_equal_endpoint_open_interval_is_invalid(self):
+        data = {
+            "price_bounds_start": "(",
+            "price_start": "10",
+            "price_stop": "10",
+            "price_bounds_stop": "]",
+        }
+        f = self.filterset(data)
+        self.assertTrue(f.form.errors)
+        self.assertEqual(f.qs.count(), IntervalItem.objects.count())
+
+    def test_reversed_interval_is_invalid(self):
+        data = {
+            "price_bounds_start": "[",
+            "price_start": "20",
+            "price_stop": "10",
+            "price_bounds_stop": "]",
+        }
+        f = self.filterset(data)
+        self.assertTrue(f.form.errors)
+
+
+class DateIntervalFilterTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.start = IntervalItem.objects.create(
+            name="start", recorded=datetime.date(2015, 1, 1)
+        )
+        cls.inner = IntervalItem.objects.create(
+            name="inner", recorded=datetime.date(2015, 1, 5)
+        )
+        cls.stop = IntervalItem.objects.create(
+            name="stop", recorded=datetime.date(2015, 1, 10)
+        )
+        cls.null = IntervalItem.objects.create(name="null", recorded=None)
+
+    def names(self, data, **kwargs):
+        class F(FilterSet):
+            recorded = DateIntervalFilter(**kwargs)
+
+            class Meta:
+                model = IntervalItem
+                fields = ["recorded"]
+
+        f = F(data, queryset=IntervalItem.objects.all())
+        self.assertFalse(f.form.errors)
+        return list(f.qs.order_by("name").values_list("name", flat=True))
+
+    def test_closed_interval_includes_end_dates(self):
+        data = {
+            "recorded_bounds_after": "[",
+            "recorded_after": "2015-01-01",
+            "recorded_before": "2015-01-10",
+            "recorded_bounds_before": "]",
+        }
+        self.assertEqual(self.names(data), ["inner", "start", "stop"])
+
+    def test_half_open_excludes_end_date(self):
+        # [2015-01-01, 2015-01-10)
+        data = {
+            "recorded_bounds_after": "[",
+            "recorded_after": "2015-01-01",
+            "recorded_before": "2015-01-10",
+            "recorded_bounds_before": ")",
+        }
+        self.assertEqual(self.names(data), ["inner", "start"])
+
+    def test_null_excluded(self):
+        data = {
+            "recorded_after": "2015-01-01",
+            "recorded_bounds_after": "[",
+            "recorded_bounds_before": "]",
+        }
+        self.assertNotIn("null", self.names(data))
 
 
 class DateRangeFilterTests(TestCase):

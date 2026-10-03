@@ -6,6 +6,8 @@ from django_filters.widgets import (
     BaseCSVWidget,
     BooleanWidget,
     CSVWidget,
+    DateIntervalWidget,
+    IntervalWidget,
     LinkWidget,
     LookupChoiceWidget,
     QueryArrayWidget,
@@ -306,6 +308,47 @@ class RangeWidgetTests(TestCase):
             <input type="date" name="date_min" />
             -
             <input type="date" name="date_max" />""",
+        )
+
+
+class IntervalWidgetTests(TestCase):
+    def test_widget(self):
+        w = IntervalWidget()
+        self.assertEqual(len(w.widgets), 4)
+        self.assertEqual(
+            w.suffixes, ["bounds_start", "start", "stop", "bounds_stop"]
+        )
+
+    def test_date_widget_suffixes(self):
+        w = DateIntervalWidget()
+        self.assertEqual(
+            w.suffixes, ["bounds_after", "after", "before", "bounds_before"]
+        )
+
+    def test_value_from_datadict(self):
+        w = IntervalWidget()
+        result = w.value_from_datadict(
+            {
+                "price_bounds_start": "(",
+                "price_start": "10",
+                "price_stop": "20",
+                "price_bounds_stop": ")",
+            },
+            {},
+            "price",
+        )
+        self.assertEqual(result, ["(", "10", "20", ")"])
+
+    def test_decompress(self):
+        from django_filters.fields import Interval
+
+        w = IntervalWidget()
+        self.assertEqual(
+            w.decompress(Interval(10, 20, False, True)),
+            ["(", 10, 20, "]"],
+        )
+        self.assertEqual(
+            w.decompress(None), ["[", None, None, "]"]
         )
 
 

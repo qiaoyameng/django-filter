@@ -17,15 +17,20 @@ from .fields import (
     BaseCSVField,
     BaseRangeField,
     ChoiceField,
+    DateIntervalField,
     DateRangeField,
+    DateTimeIntervalField,
     DateTimeRangeField,
+    IntervalField,
     IsoDateTimeField,
+    IsoDateTimeIntervalField,
     IsoDateTimeRangeField,
     LookupChoiceField,
     ModelChoiceField,
     ModelMultipleChoiceField,
     MultipleChoiceField,
     RangeField,
+    TimeIntervalField,
     TimeRangeField,
 )
 from .utils import get_model_field, label_for_filter
@@ -49,13 +54,17 @@ __all__ = [
     "ChoiceFilter",
     "DateFilter",
     "DateFromToRangeFilter",
+    "DateIntervalFilter",
     "DateRangeFilter",
     "DateTimeFilter",
     "DateTimeFromToRangeFilter",
+    "DateTimeIntervalFilter",
     "DurationFilter",
     "Filter",
+    "IntervalFilter",
     "IsoDateTimeFilter",
     "IsoDateTimeFromToRangeFilter",
+    "IsoDateTimeIntervalFilter",
     "LookupChoiceFilter",
     "ModelChoiceFilter",
     "ModelMultipleChoiceFilter",
@@ -65,6 +74,7 @@ __all__ = [
     "OrderingFilter",
     "RangeFilter",
     "TimeFilter",
+    "TimeIntervalFilter",
     "TimeRangeFilter",
     "TypedChoiceFilter",
     "TypedMultipleChoiceFilter",
@@ -437,6 +447,77 @@ class RangeFilter(Filter):
         return super().filter(qs, value)
 
 
+class IntervalFilter(Filter):
+    """
+    Filter by an interval whose endpoint inclusion is fully controllable,
+    supporting ``[a, b]``, ``(a, b)``, ``[a, b)`` and ``(a, b]`` as well as
+    unbounded endpoints.
+
+    The accompanying :class:`~django_filters.fields.IntervalField` cleans both
+    endpoints using the configured form fields, so numeric and date-based
+    columns are supported through the same filter.
+
+    ``nullable``
+        When ``False`` (the default) rows whose filtered column is ``NULL``
+        never appear in the results, for both normal filtering and
+        ``exclude=True``. This avoids ``NULL`` rows leaking in due to SQL's
+        three-valued logic. Set to ``True`` to leave ``NULL`` handling to the
+        database, where ``exclude`` returns ``NULL`` rows as not matching.
+    """
+
+    field_class = IntervalField
+
+    def __init__(self, *args, nullable=False, **kwargs):
+        self.nullable = nullable
+        super().__init__(*args, **kwargs)
+
+    def get_q(self, value):
+        """
+        Build the interval predicate from cleaned endpoints rather than
+        assembling a lookup expression out of strings.
+        """
+        predicates = []
+        if value.start is not None:
+            expr = "gte" if value.start_inclusive else "gt"
+            predicates.append(
+                Q(**{LOOKUP_SEP.join([self.field_name, expr]): value.start})
+            )
+        if value.stop is not None:
+            expr = "lte" if value.stop_inclusive else "lt"
+            predicates.append(
+                Q(**{LOOKUP_SEP.join([self.field_name, expr]): value.stop})
+            )
+
+        predicate = Q()
+        for part in predicates:
+            predicate &= part
+        return predicate
+
+    def filter(self, qs, value):
+        if value in EMPTY_VALUES:
+            return qs
+
+        if self.distinct:
+            qs = qs.distinct()
+
+        predicate = self.get_q(value)
+
+        # Guard against NULL rows leaking into the result. Comparison
+        # predicates never match NULL, but exclude() would otherwise include
+        # them as "not matched" under SQL three-valued logic.
+        if not self.nullable:
+            not_null = Q(
+                **{LOOKUP_SEP.join([self.field_name, "isnull"]): False}
+            )
+            if self.exclude:
+                return qs.filter(not_null).exclude(predicate)
+            predicate &= not_null
+
+        if self.exclude:
+            return qs.exclude(predicate)
+        return qs.filter(predicate)
+
+
 def _truncate(dt):
     return dt.date()
 
@@ -525,16 +606,32 @@ class DateFromToRangeFilter(RangeFilter):
     field_class = DateRangeField
 
 
+class DateIntervalFilter(IntervalFilter):
+    field_class = DateIntervalField
+
+
 class DateTimeFromToRangeFilter(RangeFilter):
     field_class = DateTimeRangeField
+
+
+class DateTimeIntervalFilter(IntervalFilter):
+    field_class = DateTimeIntervalField
 
 
 class IsoDateTimeFromToRangeFilter(RangeFilter):
     field_class = IsoDateTimeRangeField
 
 
+class IsoDateTimeIntervalFilter(IntervalFilter):
+    field_class = IsoDateTimeIntervalField
+
+
 class TimeRangeFilter(RangeFilter):
     field_class = TimeRangeField
+
+
+class TimeIntervalFilter(IntervalFilter):
+    field_class = TimeIntervalField
 
 
 class AllValuesFilter(ChoiceFilter):

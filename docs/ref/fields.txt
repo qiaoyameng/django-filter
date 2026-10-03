@@ -7,6 +7,33 @@ Field Reference
 
 .. currentmodule:: django_filters.fields
 
+.. class:: Interval
+
+A ``namedtuple`` representing a mathematical interval. It exposes the cleaned
+endpoint values ``start`` and ``stop`` (``None`` means an unbounded/infinite
+endpoint) and the booleans ``start_inclusive`` and ``stop_inclusive``.
+
+``None`` itself represents "no interval provided". A populated
+:class:`Interval` with two finite endpoints that cannot contain a value is an
+*empty* interval -- detected by the ``is_empty`` property -- and is raised as a
+validation error by :class:`IntervalField`. This covers reversed intervals
+(``start > stop``) and an open interval whose endpoints are equal.
+
+.. class:: IntervalField
+
+A reusable ``MultiValueField`` for half-open, open, closed or unbounded
+intervals. The two endpoints are cleaned by the supplied form fields, so the
+same class serves numbers (``forms.DecimalField`` by default), dates,
+datetimes and times. Its cleaned value is an :class:`Interval`, or ``None``
+when neither endpoint is provided. Omitted boundary selectors default to an
+inclusive endpoint.
+
+``DateIntervalField``, ``DateTimeIntervalField``,
+``IsoDateTimeIntervalField`` and ``TimeIntervalField`` provide the typed
+variants. ``DateIntervalField`` spans the full upper day for an inclusive
+boundary (``time.max``) and the beginning of the day for an exclusive one
+(``time.min``).
+
 .. class:: IsoDateTimeField
 
 Extends :class:`django.forms.DateTimeField` to allow parsing ISO 8601 formated dates, in addition to existing formats
@@ -21,4 +48,3 @@ You may set :attr:`~django.forms.DateTimeField.input_formats` to your list of re
 
     f = IsoDateTimeField()
     f.input_formats = [IsoDateTimeField.ISO_8601] + DateTimeField.input_formats
-

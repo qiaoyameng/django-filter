@@ -62,6 +62,18 @@ a :class:`~django_filters.filters.RangeFilter`:
   date_range = DateFromToRangeFilter(widget=RangeWidget(attrs={'placeholder': 'YYYY/MM/DD'}))
 
 
+.. class:: IntervalWidget
+
+This widget is used with :class:`~django_filters.filters.IntervalFilter` and
+its subclasses. It renders four inputs -- two endpoint text inputs and two
+boundary selectors -- with the suffixed names ``<name>_bounds_start``,
+``<name>_start``, ``<name>_stop`` and ``<name>_bounds_stop``. The selectors
+expose the interval notation for the adjacent endpoint (``[``/``(`` for the
+lower boundary and ``]``/``)`` for the upper one).
+:class:`~django_filters.widgets.DateIntervalWidget` is the date variant,
+suffixed ``bounds_after``/``after``/``before``/``bounds_before``.
+
+
 .. class:: SuffixedMultiWidget
 
 Extends Django's builtin :class:`~django.forms.MultiWidget` to append custom suffixes

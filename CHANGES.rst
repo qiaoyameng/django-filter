@@ -1,6 +1,14 @@
 Version 26.1 (2026-07-11)
 -------------------------
 
+* Added ``IntervalFilter`` (plus ``DateIntervalFilter``,
+  ``DateTimeIntervalFilter``, ``IsoDateTimeIntervalFilter`` and
+  ``TimeIntervalFilter``) for filtering by open, half-open, closed and
+  unbounded intervals. The reusable ``IntervalField`` cleans both endpoints
+  using its inner form fields, validates reversed intervals and open
+  intervals with equal endpoints, and defaults to excluding ``NULL`` rows --
+  including from ``exclude`` results -- unless ``nullable=True``.
+
 * Added testing for Django 6.1.
 
   DRF integration will require the upcoming DRF v3.18.

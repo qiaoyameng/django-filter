@@ -143,6 +143,49 @@ class DateRangeWidget(RangeWidget):
     suffixes = ["after", "before"]
 
 
+class IntervalWidget(SuffixedMultiWidget):
+    """
+    Render an interval as two endpoint inputs plus an inclusive/exclusive
+    selector for each boundary: ``[min, [value], value] [value], max)``.
+
+    The selectors expose the mathematical interval notation for the adjacent
+    endpoint: ``[``/``(`` for the lower boundary and ``]``/``)`` for the
+    upper boundary.
+    """
+
+    template_name = "django_filters/widgets/multiwidget.html"
+    suffixes = ["bounds_start", "start", "stop", "bounds_stop"]
+
+    def __init__(self, attrs=None):
+        select_start = forms.Select(
+            choices=(("[", "["), ("(", "(")),
+        )
+        select_stop = forms.Select(
+            choices=(("]", "]"), (")", ")")),
+        )
+        widgets = (
+            select_start,
+            forms.TextInput,
+            forms.TextInput,
+            select_stop,
+        )
+        super().__init__(widgets, attrs)
+
+    def decompress(self, value):
+        if value:
+            return [
+                "[" if value.start_inclusive else "(",
+                value.start,
+                value.stop,
+                "]" if value.stop_inclusive else ")",
+            ]
+        return ["[", None, None, "]"]
+
+
+class DateIntervalWidget(IntervalWidget):
+    suffixes = ["bounds_after", "after", "before", "bounds_before"]
+
+
 class LookupChoiceWidget(SuffixedMultiWidget):
     suffixes = [None, "lookup"]
 
