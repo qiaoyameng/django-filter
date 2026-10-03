@@ -644,6 +644,74 @@ database.  So if in the DB for the given field you have values of 5, 7, and 9
 each of those is present as an option.  This is similar to the default behavior
 of the admin.
 
+.. _json-path-filter:
+.. class:: JSONPathFilter
+
+Filter stable paths inside a model ``JSONField`` without allowing request data
+to choose arbitrary ORM lookups. Each declared :class:`JSONPath` selects the
+Django form field used to validate input and the comparison expressions that
+may be used.
+
+Paths are lists or tuples of object keys and integer array indices. Keeping
+the segments as Python values means keys containing ``__``, ``.`` or quotes
+are not interpreted as ORM lookups. Paths and values are sent to the database
+as bound parameters.
+
+.. code-block:: python
+
+    from django import forms
+
+    class ProductFilter(FilterSet):
+        attributes = JSONPathFilter(
+            field_name="attributes",
+            paths=[
+                JSONPath(
+                    ["dimensions", "weight"],
+                    forms.DecimalField(),
+                    ["exact", "gt", "gte", "lt", "lte"],
+                ),
+                JSONPath(
+                    ["name"],
+                    forms.CharField(),
+                    ["exact", "contains"],
+                ),
+            ],
+        )
+
+        class Meta:
+            model = Product
+            fields = []
+
+The request supplies the value, a JSON-encoded selected path, and the lookup::
+
+    ?attributes=10&attributes_path=["dimensions","weight"]&attributes_lookup=gte
+
+When only one path is declared, use the ``path``, ``form_field`` and
+``lookups`` arguments and omit the path parameter::
+
+    weight = JSONPathFilter(
+        field_name="attributes",
+        path=["dimensions", "weight"],
+        form_field=forms.DecimalField(),
+        lookups=["exact", "gte", "lte"],
+    )
+
+    # ?weight=10&weight_lookup=gte
+
+Numeric comparisons use the declared database field. By default an integer form
+field compares SQLite ``integer`` JSON values, while decimal and float form
+fields compare ``integer`` and ``real`` values. JSON strings containing digits
+are not treated as numbers. Pass ``output_field`` (or ``db_type``) to use a
+specific model field type, such as ``models.IntegerField()``.
+
+In addition to the regular comparisons, the unary expressions ``has_key``,
+``isnull``, ``missing_key``, ``json_isnull`` and ``sql_isnull`` distinguish
+between a present JSON ``null``, an absent path, and a SQL ``NULL`` JSONField
+value. Unknown paths and lookups are rejected during form validation.
+
+SQLite, PostgreSQL and MySQL are supported. Unsupported backends or paths raise
+``django.db.NotSupportedError``.
+
 .. _lookup-choice-filter:
 .. class:: LookupChoiceFilter
 

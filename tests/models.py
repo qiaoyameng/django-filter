@@ -210,3 +210,7 @@ class SpacewalkRecord(models.Model):
 
     astronaut = models.CharField(max_length=100)
     duration = models.DurationField()
+
+
+class JSONRecord(models.Model):
+    data = models.JSONField(null=True)

@@ -2,9 +2,11 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from datetime import timedelta
 from itertools import chain
+import json
 
 from django import forms
 from django.core.validators import MaxValueValidator
+from django.db import connections
 from django.db.models import Q
 from django.db.models.constants import LOOKUP_SEP
 from django.forms.utils import pretty_name
@@ -28,6 +30,7 @@ from .fields import (
     RangeField,
     TimeRangeField,
 )
+from .json import JSONPath, JSONPathField, JSONPathLookup, build_json_path_q
 from .utils import get_model_field, label_for_filter
 
 try:
@@ -56,6 +59,8 @@ __all__ = [
     "Filter",
     "IsoDateTimeFilter",
     "IsoDateTimeFromToRangeFilter",
+    "JSONPath",
+    "JSONPathFilter",
     "LookupChoiceFilter",
     "ModelChoiceFilter",
     "ModelMultipleChoiceFilter",
@@ -712,6 +717,94 @@ class LookupChoiceFilter(Filter):
 
         self.lookup_expr = lookup.lookup_expr
         return super().filter(qs, lookup.value)
+
+
+class JSONPathFilter(Filter):
+    field_class = JSONPathField
+
+    def __init__(
+        self,
+        field_name=None,
+        paths=None,
+        *,
+        json_path=None,
+        path=None,
+        form_field=None,
+        field_class=None,
+        lookups=None,
+        **kwargs,
+    ):
+        if field_class is not None and form_field is None:
+            form_field = field_class
+        if lookups is None and kwargs.get("lookup_expr") is not None:
+            lookups = [kwargs["lookup_expr"]]
+        super().__init__(field_name=field_name, **kwargs)
+        if json_path is not None:
+            if paths is not None:
+                raise ValueError("Provide either 'paths' or 'json_path', not both.")
+            paths = (json_path,)
+        elif path is not None:
+            if paths is not None:
+                raise ValueError("Provide either 'paths' or 'path', not both.")
+            paths = (JSONPath(path, form_field=form_field, lookups=lookups),)
+
+        if paths is None:
+            raise ValueError("JSONPathFilter requires a path or paths.")
+
+        self.path_specs = OrderedDict()
+        for path_spec in paths:
+            if not isinstance(path_spec, JSONPath):
+                if isinstance(path_spec, dict):
+                    path_spec = JSONPath(**path_spec)
+                elif isinstance(path_spec, (list, tuple)) and not all(
+                    isinstance(item, (str, int)) for item in path_spec
+                ):
+                    path, *options = path_spec
+                    options = options[0] if options and isinstance(options[0], dict) else {}
+                    path_spec = JSONPath(path, **options)
+                else:
+                    path_spec = JSONPath(path_spec)
+            path_key = json.dumps(path_spec.path, separators=(",", ":"))
+            self.path_specs[path_key] = path_spec
+
+        self.single_path = len(self.path_specs) == 1
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            field_kwargs = self.extra.copy()
+            if settings.DISABLE_HELP_TEXT:
+                field_kwargs.pop("help_text", None)
+            self._field = self.field_class(
+                self.path_specs,
+                single=self.single_path,
+                label=self.label,
+                **field_kwargs,
+            )
+        return self._field
+
+    def filter(self, qs, value):
+        if value in EMPTY_VALUES or not isinstance(value, JSONPathLookup):
+            return qs
+
+        model_field = get_model_field(self.model, self.field_name)
+        if model_field is None or model_field.get_internal_type() != "JSONField":
+            raise ValueError(
+                "JSONPathFilter field_name must resolve to a JSONField."
+            )
+
+        spec = next(spec for spec in self.path_specs.values() if spec.path == value.path)
+        expressions, condition = build_json_path_q(
+            connections[qs.db],
+            self.field_name,
+            spec,
+            value.lookup_expr,
+            value.value,
+        )
+        if self.distinct:
+            qs = qs.distinct()
+        qs = qs.annotate(**expressions)
+        return self.get_method(qs)(condition)
 
 
 class OrderingFilter(BaseCSVFilter, ChoiceFilter):
