@@ -1,7 +1,10 @@
 import unittest
 import warnings
+from datetime import date
 from unittest import mock
 
+from django import forms
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.test import TestCase, override_settings
 from django.utils.datastructures import MultiValueDict
@@ -13,6 +16,7 @@ from django_filters.filters import (
     BooleanFilter,
     CharFilter,
     ChoiceFilter,
+    DateFilter,
     DateRangeFilter,
     Filter,
     FilterMethod,
@@ -38,6 +42,7 @@ from .models import (
     Business,
     Comment,
     DirectedNode,
+    HiredWorker,
     NetworkSetting,
     Node,
     Profile,
@@ -955,6 +960,167 @@ class FilterSetQuerysetTests(TestCase):
 
 
 # test filter.method here, as it depends on its parent FilterSet
+# Forms used by the strict FilterSet test cases below.
+class StrictFilterSetCustomValidationForm(forms.Form):
+    def clean(self):
+        super().clean()
+        raise forms.ValidationError("Custom validation failed.")
+
+
+class StrictFilterSetUnknownFieldForm(forms.Form):
+    def clean(self):
+        super().clean()
+        raise forms.ValidationError({"custom_unknown": "Custom field error."})
+
+
+class StrictFilterSetTests(TestCase):
+    class TenantFilterSet(FilterSet):
+        salary = NumberFilter(method="filter_tenant")
+        date = DateFilter(field_name="hired_on")
+
+        class Meta:
+            model = HiredWorker
+            fields = ["salary", "date"]
+
+        def filter_tenant(self, queryset, name, value):
+            self.tenant_filter_calls += 1
+            return queryset.filter(salary=value)
+
+    class StrictTenantFilterSet(TenantFilterSet):
+        class Meta:
+            model = HiredWorker
+            fields = ["salary", "date"]
+            strict = True
+
+    class StrictFormTenantFilterSet(TenantFilterSet):
+        class Meta:
+            model = HiredWorker
+            fields = ["salary", "date"]
+            form = StrictFilterSetCustomValidationForm
+            strict = True
+
+    class StrictUnknownFieldFormTenantFilterSet(TenantFilterSet):
+        class Meta:
+            model = HiredWorker
+            fields = ["salary", "date"]
+            form = StrictFilterSetUnknownFieldForm
+            strict = True
+
+    def test_invalid_input_is_rejected_without_filtering_or_queries(self):
+        today = date.today()
+        worker = Worker.objects.create(name="tenant")
+        HiredWorker.objects.create(
+            salary=1,
+            hired_on=today,
+            worker=worker,
+            business=Business.objects.create(name="tenant"),
+        )
+        filterset = self.StrictTenantFilterSet(
+            {"salary": "1", "date": "not-a-date"}
+        )
+        filterset.tenant_filter_calls = 0
+
+        with self.assertNumQueries(0):
+            self.assertFalse(filterset.is_valid())
+            self.assertEqual(filterset.errors["date"][0], "Enter a valid date.")
+
+            with self.assertRaises(ValidationError):
+                filterset.qs
+            with self.assertRaises(ValidationError):
+                filterset.qs
+
+        self.assertEqual(filterset.tenant_filter_calls, 0)
+
+        corrected = self.StrictTenantFilterSet(
+            {"salary": "1", "date": today.isoformat()}
+        )
+        corrected.tenant_filter_calls = 0
+
+        with self.assertNumQueries(1):
+            results = list(corrected.qs)
+
+        self.assertEqual([obj.salary for obj in results], [1])
+        self.assertEqual(corrected.tenant_filter_calls, 1)
+
+    def test_form_clean_and_unknown_parameter_errors_are_aggregated(self):
+        filterset = self.StrictFormTenantFilterSet(
+            {"salary": "1", "date": "not-a-date", "unknown": "value"},
+        )
+        filterset.tenant_filter_calls = 0
+
+        with self.assertNumQueries(0):
+            self.assertFalse(filterset.is_valid())
+
+            with self.assertRaises(ValidationError):
+                filterset.qs
+
+        self.assertIn("date", filterset.errors)
+        self.assertIn("__all__", filterset.errors)
+        self.assertEqual(filterset.errors["unknown"][0], "Unknown filter field.")
+        self.assertEqual(filterset.tenant_filter_calls, 0)
+
+    def test_form_clean_error_for_unknown_parameter_keeps_field_path(self):
+        filterset = self.StrictUnknownFieldFormTenantFilterSet(
+            {"date": date.today().isoformat(), "custom_unknown": "value"}
+        )
+
+        self.assertFalse(filterset.is_valid())
+        self.assertEqual(
+            filterset.errors["custom_unknown"][0], "Custom field error."
+        )
+
+    def test_qs_does_not_rerun_validation(self):
+        filterset = self.StrictTenantFilterSet({"date": "not-a-date"})
+
+        with mock.patch.object(
+            filterset.form, "full_clean", wraps=filterset.form.full_clean
+        ) as full_clean:
+            self.assertFalse(filterset.is_valid())
+
+            with self.assertRaises(ValidationError):
+                filterset.qs
+            with self.assertRaises(ValidationError):
+                filterset.qs
+
+        full_clean.assert_called_once_with()
+
+    def test_unknown_parameter_is_ignored_by_default(self):
+        filterset = self.TenantFilterSet(
+            {"salary": "1", "date": date.today().isoformat(), "unknown": "value"}
+        )
+
+        self.assertTrue(filterset.is_valid())
+        self.assertNotIn("unknown", filterset.errors)
+
+    def test_strict_argument_enables_strict_mode(self):
+        filterset = self.TenantFilterSet(
+            {"unknown": "value"},
+            strict=True,
+        )
+
+        self.assertFalse(filterset.is_valid())
+        self.assertEqual(filterset.errors["unknown"][0], "Unknown filter field.")
+        with self.assertRaises(ValidationError):
+            filterset.qs
+
+    def test_strict_argument_can_disable_meta_strict_mode(self):
+        filterset = self.StrictTenantFilterSet({"unknown": "value"}, strict=False)
+
+        self.assertTrue(filterset.is_valid())
+        self.assertNotIn("unknown", filterset.errors)
+
+    def test_strict_unknown_parameter_keeps_unprefixed_field_path(self):
+        filterset = self.TenantFilterSet(
+            {"filters-unknown": "value"},
+            prefix="filters",
+            strict=True,
+        )
+
+        self.assertFalse(filterset.is_valid())
+        self.assertEqual(filterset.errors["unknown"][0], "Unknown filter field.")
+
+
+# Filter method tests require access to their parent FilterSet.
 class FilterMethodTests(TestCase):
     def test_none(self):
         # use a mock to bypass bound/unbound method equality

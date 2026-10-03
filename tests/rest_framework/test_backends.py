@@ -1,3 +1,4 @@
+import datetime
 from unittest import mock
 
 from django.db.models import BooleanField
@@ -36,6 +37,23 @@ class SeveralFieldsFilter(FilterSet):
     class Meta:
         model = FilterableItem
         fields = ["text", "decimal", "date"]
+
+
+class StrictSeveralFieldsFilter(FilterSet):
+    decimal = filters.NumberFilter(method="filter_decimal")
+
+    class Meta:
+        model = FilterableItem
+        fields = ["decimal", "date"]
+        strict = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decimal_filter_calls = 0
+
+    def filter_decimal(self, queryset, name, value):
+        self.decimal_filter_calls += 1
+        return queryset.filter(decimal=value)
 
 
 # Basic filter on a list view.
@@ -245,6 +263,57 @@ class ValidationErrorTests(TestCase):
                 ],
             },
         )
+
+    def test_strict_errors_are_reported_before_filtering(self):
+        view = FilterClassRootView()
+        view.filterset_class = StrictSeveralFieldsFilter
+        backend = DjangoFilterBackend()
+        backend.raise_exception = False
+        queryset = FilterableItem.objects.all()
+        request = factory.get("/?decimal=1.00&date=not-a-date")
+        request = view.initialize_request(request)
+        filterset = backend.get_filterset(request, queryset, view)
+
+        with self.assertNumQueries(0):
+            with self.assertRaises(serializers.ValidationError) as exc:
+                backend.filter_queryset(request, queryset, view)
+
+        self.assertEqual(exc.exception.detail, {"date": ["Enter a valid date."]})
+        self.assertEqual(filterset.decimal_filter_calls, 0)
+
+    def test_strict_unknown_parameter_error_path(self):
+        view = FilterClassRootView()
+        view.filterset_class = StrictSeveralFieldsFilter
+        backend = DjangoFilterBackend()
+        queryset = FilterableItem.objects.all()
+        request = factory.get("/?decimal=1.00&date=not-a-date&unknown=value")
+        request = view.initialize_request(request)
+
+        with self.assertRaises(serializers.ValidationError) as exc:
+            backend.filter_queryset(request, queryset, view)
+
+        self.assertEqual(
+            exc.exception.detail,
+            {
+                "date": ["Enter a valid date."],
+                "unknown": ["Unknown filter field."],
+            },
+        )
+
+    def test_strict_corrected_input_is_filtered(self):
+        today = datetime.date.today()
+        item = FilterableItem.objects.create(
+            text="strict", decimal="1.00", date=today
+        )
+        view = FilterClassRootView()
+        view.filterset_class = StrictSeveralFieldsFilter
+        backend = DjangoFilterBackend()
+        request = factory.get(f"/?decimal=1.00&date={today.isoformat()}")
+        request = view.initialize_request(request)
+
+        filtered = backend.filter_queryset(request, FilterableItem.objects.all(), view)
+
+        self.assertEqual(list(filtered), [item])
 
 
 class DjangoFilterBackendTestCase(TestCase):

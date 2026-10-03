@@ -67,7 +67,9 @@ class DjangoFilterBackend:
         if filterset is None:
             return queryset
 
-        if not filterset.is_valid() and self.raise_exception:
+        if not filterset.is_valid() and (
+            self.raise_exception or getattr(filterset, "strict", False)
+        ):
             raise utils.translate_validation(filterset.errors)
         return filterset.qs
 

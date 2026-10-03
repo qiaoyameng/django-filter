@@ -4,10 +4,12 @@ from collections import OrderedDict
 from enum import Enum
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.http import QueryDict
+from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import ALL_FIELDS
@@ -51,11 +53,60 @@ class UnknownFieldBehavior(Enum):
     IGNORE = "ignore"
 
 
+class StrictFilterSetForm(forms.Form):
+    def unknown_filter_field_names(self):
+        names = []
+        seen = set()
+        prefix = f"{self.prefix}-" if self.prefix else ""
+
+        for field_name in self.data:
+            if self.prefix:
+                if not field_name.startswith(prefix):
+                    continue
+                field_name = field_name[len(prefix) :]
+
+            if field_name not in self.fields and field_name not in seen:
+                names.append(field_name)
+                seen.add(field_name)
+
+        return names
+
+    def full_clean(self):
+        self._unknown_filter_fields = self.unknown_filter_field_names()
+        super().full_clean()
+
+        for field_name in self._unknown_filter_fields:
+            if field_name in self._errors:
+                continue
+
+            error_list = self._errors.setdefault(
+                field_name,
+                self.error_class(renderer=self.renderer),
+            )
+            error_list.append(forms.ValidationError(_("Unknown filter field.")))
+            self.cleaned_data.pop(field_name, None)
+
+    def add_error(self, field, error):
+        unknown_fields = getattr(self, "_unknown_filter_fields", ())
+        if field is None and hasattr(error, "error_dict"):
+            for field_name in error.error_dict:
+                if field_name not in self.fields and field_name in unknown_fields:
+                    self.fields[field_name] = forms.Field(required=False)
+        elif (
+            field is not None
+            and field not in self.fields
+            and field in unknown_fields
+        ):
+            self.fields[field] = forms.Field(required=False)
+        super().add_error(field, error)
+
+
 class FilterSetOptions:
     def __init__(self, options=None):
         self.model = getattr(options, "model", None)
         self.fields = getattr(options, "fields", None)
         self.exclude = getattr(options, "exclude", None)
+        self.strict = getattr(options, "strict", False)
 
         self.filter_overrides = getattr(options, "filter_overrides", {})
 
@@ -190,7 +241,9 @@ FILTER_FOR_DBFIELD_DEFAULTS = {
 class BaseFilterSet:
     FILTER_DEFAULTS = FILTER_FOR_DBFIELD_DEFAULTS
 
-    def __init__(self, data=None, queryset=None, *, request=None, prefix=None):
+    def __init__(
+        self, data=None, queryset=None, *, request=None, prefix=None, strict=None
+    ):
         if queryset is None:
             queryset = self._meta.model._default_manager.all()
         model = queryset.model
@@ -200,6 +253,7 @@ class BaseFilterSet:
         self.queryset = queryset
         self.request = request
         self.form_prefix = prefix
+        self.strict = self._meta.strict if strict is None else strict
 
         self.filters = copy.deepcopy(self.base_filters)
 
@@ -229,6 +283,9 @@ class BaseFilterSet:
         This method should be overridden if additional filtering needs to be
         applied to the queryset before it is cached.
         """
+        if self.is_bound and self.strict and self.form.errors:
+            raise ValidationError(self.form.errors.as_data())
+
         for name, value in self.form.cleaned_data.items():
             queryset = self.filters[name].filter(queryset, value)
             assert isinstance(
@@ -243,10 +300,14 @@ class BaseFilterSet:
     @property
     def qs(self):
         if not hasattr(self, "_qs"):
-            qs = self.queryset.all()
             if self.is_bound:
                 # ensure form validation before filtering
                 self.errors
+                if self.strict and self.form.errors:
+                    raise ValidationError(self.form.errors.as_data())
+
+            qs = self.queryset.all()
+            if self.is_bound:
                 qs = self.filter_queryset(qs)
             self._qs = qs
         return self._qs
@@ -262,7 +323,17 @@ class BaseFilterSet:
             [(name, filter_.field) for name, filter_ in self.filters.items()]
         )
 
-        return type(str("%sForm" % self.__class__.__name__), (self._meta.form,), fields)
+        form_bases = (
+            (StrictFilterSetForm, self._meta.form)
+            if self.strict
+            else (self._meta.form,)
+        )
+        form_name = "%s%sForm" % (
+            self.__class__.__name__,
+            "Strict" if self.strict else "",
+        )
+
+        return type(str(form_name), form_bases, fields)
 
     @property
     def form(self):

@@ -19,6 +19,7 @@ Meta options
 - :ref:`fields <fields>`
 - :ref:`exclude <exclude>`
 - :ref:`form <form>`
+- :ref:`strict <strict>`
 - :ref:`filter_overrides <filter_overrides>`
 - :ref:`unknown_field_behavior <unknown_field_behavior>`
 
@@ -122,6 +123,35 @@ Custom Forms using ``form``
 The inner ``Meta`` class also takes an optional ``form`` argument.  This is a
 form class from which ``FilterSet.form`` will subclass.  This works similar to
 the ``form`` option on a :class:`~django.contrib.admin.ModelAdmin`.
+
+
+.. _strict:
+
+Reject invalid input with ``strict``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``strict`` to ``True`` to reject the whole request when any filter value is
+invalid or when the data contains a parameter without a corresponding filter.
+Validation is performed before any filter method is called, so valid filters are
+not applied to return a wider result set.
+
+.. code-block:: python
+
+    class UserFilter(django_filters.FilterSet):
+        class Meta:
+            model = User
+            fields = ['username', 'last_login']
+            strict = True
+
+The option can also be enabled for an individual instance with
+``UserFilter(request.GET, queryset, strict=True)``. Strict mode is disabled by
+default, in which case unknown parameters are ignored and valid filters remain
+available through ``cleaned_data``.
+
+Invalid input remains available through the ``errors`` attribute. Directly
+accessing ``qs`` raises Django's :class:`~django.core.exceptions.ValidationError`.
+The Django REST Framework backend checks ``is_valid()`` first and raises its
+serializer ``ValidationError`` with the original field paths.
 
 
 .. _filter_overrides:
