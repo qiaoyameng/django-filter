@@ -4,10 +4,13 @@ from collections import OrderedDict
 from enum import Enum
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
+from django.forms.utils import ErrorDict, ErrorList
 from django.http import QueryDict
+from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import ALL_FIELDS
@@ -60,6 +63,8 @@ class FilterSetOptions:
         self.filter_overrides = getattr(options, "filter_overrides", {})
 
         self.form = getattr(options, "form", forms.Form)
+
+        self.strict = getattr(options, "strict", False)
 
         behavior = getattr(
             options,
@@ -211,15 +216,38 @@ class BaseFilterSet:
     def is_valid(self):
         """
         Return True if the underlying form has no errors, or False otherwise.
+
+        In strict mode, unknown parameters are also treated as errors.
         """
-        return self.is_bound and self.form.is_valid()
+        return self.is_bound and not self.errors
 
     @property
     def errors(self):
         """
         Return an ErrorDict for the data provided for the underlying form.
+
+        In strict mode, this also includes an error for each submitted
+        parameter that does not correspond to a known filter, keyed by the
+        parameter name.
         """
-        return self.form.errors
+        if not self._meta.strict:
+            return self.form.errors
+        if not hasattr(self, "_strict_errors"):
+            errors = ErrorDict(self.form.errors)
+            for name in self.get_unknown_parameters():
+                errors[name] = ErrorList(
+                    [ValidationError(_("Unknown filter parameter."), code="unknown")]
+                )
+            self._strict_errors = errors
+        return self._strict_errors
+
+    def get_unknown_parameters(self):
+        """
+        Return the names of any submitted parameters that do not correspond
+        to a filter on this filterset. Only relevant in strict mode.
+        """
+        known = {self.form.add_prefix(name) for name in self.form.fields}
+        return [name for name in self.data if name not in known]
 
     def filter_queryset(self, queryset):
         """
@@ -246,8 +274,13 @@ class BaseFilterSet:
             qs = self.queryset.all()
             if self.is_bound:
                 # ensure form validation before filtering
-                self.errors
-                qs = self.filter_queryset(qs)
+                errors = self.errors
+                if self._meta.strict and errors:
+                    # strict mode rejects the input as a whole: no filter
+                    # methods are called and the queryset is never evaluated
+                    qs = qs.none()
+                else:
+                    qs = self.filter_queryset(qs)
             self._qs = qs
         return self._qs
 

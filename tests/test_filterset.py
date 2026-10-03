@@ -2,6 +2,7 @@ import unittest
 import warnings
 from unittest import mock
 
+from django import forms
 from django.db import models
 from django.test import TestCase, override_settings
 from django.utils.datastructures import MultiValueDict
@@ -13,6 +14,7 @@ from django_filters.filters import (
     BooleanFilter,
     CharFilter,
     ChoiceFilter,
+    DateFilter,
     DateRangeFilter,
     Filter,
     FilterMethod,
@@ -952,6 +954,111 @@ class FilterSetQuerysetTests(TestCase):
         msg = "Expected 'F.invalid' to return a QuerySet, but got a NoneType instead."
         with self.assertRaisesMessage(AssertionError, msg):
             f.qs
+
+
+class StrictFilterSetTests(TestCase):
+    def make_filterset_class(self, strict=True, form=None):
+        callback = mock.Mock()
+        meta_attrs = {
+            "model": Comment,
+            "fields": [],
+            "strict": strict,
+        }
+        if form is not None:
+            meta_attrs["form"] = form
+
+        class F(FilterSet):
+            tenant = CharFilter(field_name="text", method="filter_tenant")
+            date = DateFilter(field_name="date")
+
+            Meta = type("Meta", (), meta_attrs)
+
+            def filter_tenant(self, qs, name, value):
+                callback(qs, name, value)
+                return qs.filter(text=value)
+
+        F.callback = callback
+        return F
+
+    def test_invalid_input_rejects_everything(self):
+        # one valid condition + one invalid date: the whole input is rejected
+        F = self.make_filterset_class()
+        f = F({"tenant": "acme", "date": "not-a-date"}, queryset=Comment.objects.all())
+
+        self.assertFalse(f.is_valid())
+        self.assertIn("date", f.errors)
+        self.assertNotIn("tenant", f.errors)
+
+        with mock.patch.object(Filter, "filter", autospec=True) as filter_spy:
+            with self.assertNumQueries(0):
+                qs = f.qs
+                self.assertEqual(list(qs), [])
+
+        filter_spy.assert_not_called()
+        F.callback.assert_not_called()
+
+    def test_corrected_input_filters_normally(self):
+        F = self.make_filterset_class()
+        f = F({"tenant": "acme", "date": "2020-01-01"}, queryset=Comment.objects.all())
+
+        self.assertTrue(f.is_valid())
+        self.assertEqual(dict(f.errors), {})
+
+        with self.assertNumQueries(1):
+            self.assertEqual(list(f.qs), [])
+        F.callback.assert_called_once()
+
+    def test_unknown_parameter_is_an_error(self):
+        F = self.make_filterset_class()
+        f = F({"tenant": "acme", "bogus": "1"}, queryset=Comment.objects.all())
+
+        self.assertFalse(f.is_valid())
+        self.assertEqual(list(f.errors), ["bogus"])
+        with self.assertNumQueries(0):
+            self.assertEqual(list(f.qs), [])
+        F.callback.assert_not_called()
+
+    def test_form_clean_error_rejects_everything(self):
+        class CleanForm(forms.Form):
+            def clean(self):
+                cleaned_data = super().clean()
+                if cleaned_data.get("tenant") == "evil":
+                    raise forms.ValidationError("tenant not allowed")
+                return cleaned_data
+
+        F = self.make_filterset_class(form=CleanForm)
+        f = F({"tenant": "evil"}, queryset=Comment.objects.all())
+
+        self.assertFalse(f.is_valid())
+        self.assertIn("__all__", f.errors)
+        with self.assertNumQueries(0):
+            self.assertEqual(list(f.qs), [])
+        F.callback.assert_not_called()
+
+    def test_repeated_qs_access_validates_once(self):
+        F = self.make_filterset_class()
+        f = F({"tenant": "acme", "date": "not-a-date"}, queryset=Comment.objects.all())
+
+        with mock.patch.object(f.form, "full_clean", wraps=f.form.full_clean) as fn:
+            f.qs
+            f.qs
+            f.is_valid()
+            f.errors
+            fn.assert_called_once()
+
+    def test_non_strict_mode_unchanged(self):
+        F = self.make_filterset_class(strict=False)
+        f = F(
+            {"tenant": "acme", "date": "not-a-date", "bogus": "1"},
+            queryset=Comment.objects.all(),
+        )
+
+        # default mode: valid conditions still apply, unknown params ignored
+        self.assertFalse(f.is_valid())
+        self.assertEqual(list(f.errors), ["date"])
+        with self.assertNumQueries(1):
+            self.assertEqual(list(f.qs), [])
+        F.callback.assert_called_once()
 
 
 # test filter.method here, as it depends on its parent FilterSet

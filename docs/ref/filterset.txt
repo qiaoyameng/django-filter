@@ -21,6 +21,7 @@ Meta options
 - :ref:`form <form>`
 - :ref:`filter_overrides <filter_overrides>`
 - :ref:`unknown_field_behavior <unknown_field_behavior>`
+- :ref:`strict <strict>`
 
 
 .. _model:
@@ -200,6 +201,33 @@ field(s) in the list of filters.
             model = User
             fields = ['username', 'last_login']
             unknown_field_behavior = UnknownFieldBehavior.WARN
+
+
+.. _strict:
+
+Rejecting invalid input wholesale with ``strict``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, a ``FilterSet`` is lenient: invalid values are dropped from the
+form's ``cleaned_data`` and the remaining valid conditions are still applied,
+which can return a wider result set than intended. Setting ``strict = True``
+rejects the input as a whole instead. All validation — field cleaning, custom
+``form.clean()`` checks, and the unknown parameter policy — runs before any
+filtering. If any of it fails, no filter methods are called and the queryset
+is never evaluated; ``FilterSet.qs`` resolves to an empty result.
+
+In strict mode, submitted parameters that do not correspond to a known filter
+are also treated as errors. ``FilterSet.errors`` exposes all failures keyed by
+parameter name, and the DRF ``DjangoFilterBackend`` raises a
+``ValidationError`` preserving those field paths.
+
+.. code-block:: python
+
+    class UserFilter(django_filters.FilterSet):
+        class Meta:
+            model = User
+            fields = ['username', 'last_login']
+            strict = True
 
 
 Overriding ``FilterSet`` methods

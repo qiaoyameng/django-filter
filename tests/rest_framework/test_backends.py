@@ -246,6 +246,49 @@ class ValidationErrorTests(TestCase):
             },
         )
 
+    def test_strict_errors(self):
+        class F(FilterSet):
+            class Meta:
+                model = FilterableItem
+                fields = ["decimal", "date"]
+                strict = True
+
+        view = FilterFieldsRootView()
+        backend = DjangoFilterBackend()
+        request = factory.get("/?decimal=1.5&date=not-a-date&bogus=1")
+        request = view.initialize_request(request)
+        queryset = FilterableItem.objects.all()
+        view.filterset_class = F
+
+        with self.assertRaises(serializers.ValidationError) as exc:
+            backend.filter_queryset(request, queryset, view)
+
+        # field paths are preserved, including the unknown parameter
+        self.assertDictEqual(
+            exc.exception.detail,
+            {
+                "date": ["Enter a valid date."],
+                "bogus": ["Unknown filter parameter."],
+            },
+        )
+
+    def test_strict_valid_input_filters(self):
+        class F(FilterSet):
+            class Meta:
+                model = FilterableItem
+                fields = ["decimal", "date"]
+                strict = True
+
+        view = FilterFieldsRootView()
+        backend = DjangoFilterBackend()
+        request = factory.get("/?decimal=1.5")
+        request = view.initialize_request(request)
+        queryset = FilterableItem.objects.all()
+        view.filterset_class = F
+
+        qs = backend.filter_queryset(request, queryset, view)
+        self.assertEqual(list(qs), [])
+
 
 class DjangoFilterBackendTestCase(TestCase):
     @classmethod
