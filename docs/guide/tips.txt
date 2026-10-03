@@ -169,6 +169,40 @@ interpreted as a skipped filter.
 
     GET http://localhost/api/my-model?myfield=
 
+Solution: ``EmptyValueFilter``
+""""""""""""""""""""""""""""""
+
+``EmptyValueFilter`` provides an explicit empty-value operator protocol. The
+comparison value and the operator are submitted as two separate parameters, so
+no magic value is reserved for ``NULL`` -- the literal string ``"null"`` is an
+ordinary comparison value.
+
+    GET http://localhost/api/my-model?myfield=&myfield__operator=equals
+
+The supported operators are ``equals``, ``not_equals``, ``isnull``,
+``isnotnull``, ``isempty`` and ``isnotempty``. Hyphenated spellings such as
+``not-equals`` are also accepted. With neither parameter present (or an empty
+value and no operator) the filter is skipped, preserving the standard behavior.
+
+.. code-block:: python
+
+    class MyFilterSet(filters.FilterSet):
+        myfield = filters.EmptyValueFilter(field_name="myfield")
+
+        class Meta:
+            model = MyModel
+            fields = []
+
+Operators that are not enabled on a filter make its form invalid. Declare a
+restricted set with the ``operators`` argument:
+
+.. code-block:: python
+
+    myfield = filters.EmptyValueFilter(
+        field_name="myfield",
+        operators=["equals", "isnull"],
+    )
+
 Solution 1: Magic values
 """"""""""""""""""""""""
 

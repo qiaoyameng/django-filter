@@ -6,6 +6,7 @@ from datetime import datetime, time, timedelta, tzinfo
 import django
 import pytz
 from django import forms
+from django.http import QueryDict
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -14,6 +15,8 @@ from django_filters.fields import (
     BaseRangeField,
     ChoiceField,
     DateRangeField,
+    EmptyValueField,
+    EmptyValueOperation,
     DateTimeRangeField,
     IsoDateTimeField,
     IsoDateTimeRangeField,
@@ -22,7 +25,12 @@ from django_filters.fields import (
     RangeField,
     TimeRangeField,
 )
-from django_filters.widgets import BaseCSVWidget, CSVWidget, RangeWidget
+from django_filters.widgets import (
+    BaseCSVWidget,
+    CSVWidget,
+    EmptyValueWidget,
+    RangeWidget,
+)
 
 
 def to_d(float_value):
@@ -168,6 +176,110 @@ class LookupChoiceFieldTests(TestCase):
                 <option selected="selected" value="lt">lt</option>
             </select>""",
         )
+
+
+class EmptyValueFieldTests(TestCase):
+    operators = [
+        "equals",
+        "not_equals",
+        "isnull",
+        "isnotnull",
+        "isempty",
+        "isnotempty",
+    ]
+
+    def make_field(self, operators=None, **kwargs):
+        return EmptyValueField(
+            operators or self.operators, required=False, **kwargs
+        )
+
+    def make_form(self, field):
+        class F(forms.Form):
+            value = field
+
+        return F
+
+    def clean(self, query_string, field=None):
+        field = field or self.make_field()
+        form = self.make_form(field)(QueryDict(query_string))
+        self.assertTrue(form.is_valid(), form.errors)
+        return form.cleaned_data["value"]
+
+    def test_field(self):
+        f = self.make_field()
+        self.assertEqual(len(f.fields), 2)
+        self.assertIsInstance(f.widget, EmptyValueWidget)
+
+    def test_no_params_compresses_to_none(self):
+        self.assertIsNone(self.clean(""))
+
+    def test_blank_value_without_operator_is_none(self):
+        # empty string submitted but no operator -> skipped, old behavior
+        self.assertIsNone(self.clean("value="))
+
+    def test_value_only_defaults_to_equals(self):
+        self.assertEqual(
+            self.clean("value=word"),
+            EmptyValueOperation("equals", "word"),
+        )
+
+    def test_literal_null_is_a_plain_value(self):
+        self.assertEqual(
+            self.clean("value=null"),
+            EmptyValueOperation("equals", "null"),
+        )
+
+    def test_blank_value_with_equals_keeps_empty_string(self):
+        self.assertEqual(
+            self.clean("value=&value__operator=equals"),
+            EmptyValueOperation("equals", ""),
+        )
+
+    def test_unary_operators(self):
+        self.assertEqual(
+            self.clean("value__operator=isnull"),
+            EmptyValueOperation("isnull", None),
+        )
+        self.assertEqual(
+            self.clean("value__operator=isempty"),
+            EmptyValueOperation("isempty", None),
+        )
+
+    def test_equals_without_value_compresses_to_none(self):
+        self.assertIsNone(self.clean("value__operator=equals"))
+        self.assertIsNone(self.clean("value__operator=not_equals"))
+
+    def test_hyphenated_operator_spellings(self):
+        self.assertEqual(
+            self.clean("value=x&value__operator=not-equals"),
+            EmptyValueOperation("not_equals", "x"),
+        )
+        self.assertEqual(
+            self.clean("value__operator=is-not-null"),
+            EmptyValueOperation("isnotnull", None),
+        )
+
+    def test_unsupported_operator_raises_form_error(self):
+        form = self.make_form(self.make_field())(
+            QueryDict("value__operator=regex")
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("value", form.errors)
+
+    def test_unsupported_operator_for_restricted_field(self):
+        field = self.make_field(operators=["equals", "isnull"])
+        form = self.make_form(field)(QueryDict("value__operator=isempty"))
+        self.assertFalse(form.is_valid())
+        self.assertIn("value", form.errors)
+
+        form = self.make_form(field)(QueryDict("value__operator=isnull"))
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_widget_uses_double_underscore_operator_param(self):
+        field = self.make_field()
+        html = field.widget.render("value", None)
+        self.assertIn('name="value__operator"', html)
+        self.assertIn('name="value"', html)
 
 
 class IsoDateTimeFieldTests(TestCase):

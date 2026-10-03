@@ -21,6 +21,7 @@ from django_filters.filters import (
     DateRangeFilter,
     DateTimeFromToRangeFilter,
     DurationFilter,
+    EmptyValueFilter,
     IsoDateTimeFromToRangeFilter,
     LookupChoiceFilter,
     ModelChoiceFilter,
@@ -45,6 +46,7 @@ from .models import (
     DirectedNode,
     Location,
     Node,
+    NullableText,
     Profile,
     SpacewalkRecord,
     User,
@@ -2204,4 +2206,148 @@ class MiscFilterSetTests(TestCase):
         )
         self.assertQuerySetEqual(
             f.qs, ["jacob", "aaron"], lambda o: o.username, ordered=False
+        )
+
+
+class EmptyValueFilterTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.none = NullableText.objects.create(value=None)
+        cls.empty = NullableText.objects.create(value="")
+        cls.word = NullableText.objects.create(value="word")
+        cls.literal_null = NullableText.objects.create(value="null")
+        cls.all_ids = {
+            cls.none.pk,
+            cls.empty.pk,
+            cls.word.pk,
+            cls.literal_null.pk,
+        }
+
+    def filterset(self, data=None, **filter_kwargs):
+        class F(FilterSet):
+            value = EmptyValueFilter(field_name="value", **filter_kwargs)
+
+            class Meta:
+                model = NullableText
+                fields = []
+
+        return F(data, queryset=NullableText.objects.all())
+
+    def ids(self, query_string):
+        fs = self.filterset(QueryDict(query_string))
+        self.assertTrue(fs.is_valid(), fs.errors)
+        return set(fs.qs.values_list("pk", flat=True))
+
+    def test_no_params_is_not_a_filter(self):
+        self.assertEqual(self.ids(""), self.all_ids)
+
+    def test_blank_value_without_operator_is_skipped(self):
+        # old behavior: an empty submitted value must not filter
+        self.assertEqual(self.ids("value="), self.all_ids)
+
+    def test_equals_word(self):
+        self.assertEqual(self.ids("value=word"), {self.word.pk})
+        self.assertEqual(
+            self.ids("value=word&value__operator=equals"), {self.word.pk}
+        )
+
+    def test_equals_literal_null_is_an_ordinary_value(self):
+        self.assertEqual(self.ids("value=null"), {self.literal_null.pk})
+        self.assertEqual(
+            self.ids("value=null&value__operator=equals"),
+            {self.literal_null.pk},
+        )
+
+    def test_equals_empty_string(self):
+        self.assertEqual(
+            self.ids("value=&value__operator=equals"), {self.empty.pk}
+        )
+
+    def test_not_equals(self):
+        self.assertEqual(
+            self.ids("value=word&value__operator=not_equals"),
+            {self.none.pk, self.empty.pk, self.literal_null.pk},
+        )
+        self.assertEqual(
+            self.ids("value=null&value__operator=not_equals"),
+            {self.none.pk, self.empty.pk, self.word.pk},
+        )
+
+    def test_not_equals_accepts_hyphenated_spelling(self):
+        self.assertEqual(
+            self.ids("value=word&value__operator=not-equals"),
+            {self.none.pk, self.empty.pk, self.literal_null.pk},
+        )
+
+    def test_isnull(self):
+        self.assertEqual(self.ids("value__operator=isnull"), {self.none.pk})
+
+    def test_isnotnull(self):
+        self.assertEqual(
+            self.ids("value__operator=isnotnull"),
+            {self.empty.pk, self.word.pk, self.literal_null.pk},
+        )
+
+    def test_isempty(self):
+        self.assertEqual(self.ids("value__operator=isempty"), {self.empty.pk})
+
+    def test_isnotempty(self):
+        self.assertEqual(
+            self.ids("value__operator=isnotempty"),
+            {self.none.pk, self.word.pk, self.literal_null.pk},
+        )
+
+    def test_operators_produce_distinct_results(self):
+        # NULL and the empty string must never be confused with each other
+        # or with the literal string "null".
+        none, empty = self.none.pk, self.empty.pk
+        word, literal_null = self.word.pk, self.literal_null.pk
+
+        self.assertEqual(
+            self.ids("value=null&value__operator=equals"), {literal_null}
+        )
+        self.assertEqual(
+            self.ids("value=&value__operator=equals"), {empty}
+        )
+        self.assertEqual(self.ids("value__operator=isnull"), {none})
+        self.assertEqual(self.ids("value__operator=isempty"), {empty})
+
+        self.assertEqual(
+            self.ids("value__operator=isnotnull"), {empty, word, literal_null}
+        )
+        self.assertEqual(
+            self.ids("value__operator=isnotempty"), {none, word, literal_null}
+        )
+
+        # The NULL row must never match the empty-string predicates and vice
+        # versa, while the literal "null" row is treated as ordinary data.
+        self.assertNotIn(empty, self.ids("value__operator=isnull"))
+        self.assertNotIn(none, self.ids("value__operator=isempty"))
+
+    def test_unsupported_operator_fails_form_validation(self):
+        fs = self.filterset(QueryDict("value__operator=regex"))
+        self.assertFalse(fs.is_valid())
+        self.assertIn("value", fs.errors)
+
+    def test_unsupported_operator_not_in_declared_choices(self):
+        fs = self.filterset(QueryDict("value__operator=isempty"))
+        self.assertTrue(fs.is_valid())
+
+        restricted = self.filterset(
+            QueryDict("value__operator=isempty"),
+            operators=["equals", "isnull"],
+        )
+        self.assertFalse(restricted.is_valid())
+        self.assertIn("value", restricted.errors)
+
+    def test_explicit_equals_without_value_is_skipped(self):
+        # operator present but value parameter absent -> no NULL comparison
+        self.assertEqual(self.ids("value__operator=equals"), self.all_ids)
+        self.assertEqual(
+            self.ids("value__operator=not_equals"), self.all_ids
+        )
+
+    def test_unary_operators_ignore_value(self):
+        self.assertEqual(
+            self.ids("value=word&value__operator=isnull"), {self.none.pk}
         )

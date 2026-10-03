@@ -152,6 +152,34 @@ class LookupChoiceWidget(SuffixedMultiWidget):
         return value
 
 
+class EmptyValueWidget(SuffixedMultiWidget):
+    """
+    Widget for the explicit empty-value operator protocol.
+
+    The comparison value is read from ``<name>`` and the operator from
+    ``<name>__operator``.
+    """
+
+    suffixes = [None, "__operator"]
+
+    def __init__(self, widgets=None, attrs=None):
+        if widgets is None:
+            widgets = (forms.TextInput, forms.Select)
+        super().__init__(widgets, attrs)
+
+    def suffixed(self, name, suffix):
+        if suffix is None:
+            return name
+        # ``suffix`` already includes the separator (``__operator``), so do
+        # not insert the underscore that ``SuffixedMultiWidget`` would add.
+        return name + suffix
+
+    def decompress(self, value):
+        if value is None:
+            return [None, None]
+        return value
+
+
 class BooleanWidget(forms.Select):
     """Convert true/false values into the internal Python True/False.
     This can be used for AJAX queries that pass true/false from JavaScript's

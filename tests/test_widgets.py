@@ -6,6 +6,7 @@ from django_filters.widgets import (
     BaseCSVWidget,
     BooleanWidget,
     CSVWidget,
+    EmptyValueWidget,
     LinkWidget,
     LookupChoiceWidget,
     QueryArrayWidget,
@@ -275,6 +276,37 @@ class SuffixedMultiWidgetTests(TestCase):
 
         a = A(widgets=[None])
         self.assertEqual(a.decompress(None), [None, None])
+
+
+class EmptyValueWidgetTests(TestCase):
+    def test_param_names_use_double_underscore(self):
+        w = EmptyValueWidget()
+        self.assertHTMLEqual(
+            w.render("value", None),
+            """
+            <input name="value" type="text" />
+            <select name="value__operator"></select>
+        """,
+        )
+
+    def test_value_from_datadict(self):
+        w = EmptyValueWidget()
+        result = w.value_from_datadict(
+            QueryDict("value=&value__operator=isnull"), {}, "value"
+        )
+        self.assertEqual(result, ["", "isnull"])
+
+        result = w.value_from_datadict(QueryDict(""), {}, "value")
+        self.assertEqual(result, [None, None])
+
+    def test_value_omitted_from_data(self):
+        w = EmptyValueWidget()
+        self.assertTrue(w.value_omitted_from_data(QueryDict(""), {}, "value"))
+        self.assertFalse(
+            w.value_omitted_from_data(
+                QueryDict("value__operator=isnull"), {}, "value"
+            )
+        )
 
 
 class RangeWidgetTests(TestCase):

@@ -210,3 +210,13 @@ class SpacewalkRecord(models.Model):
 
     astronaut = models.CharField(max_length=100)
     duration = models.DurationField()
+
+
+class NullableText(models.Model):
+    """A text column that can be NULL, the empty string, or a literal value
+    (including the literal string ``"null"``)."""
+
+    value = models.CharField(max_length=100, null=True, blank=True)
+
+    class Meta:
+        ordering = ("pk",)

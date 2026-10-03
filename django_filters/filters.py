@@ -19,6 +19,8 @@ from .fields import (
     ChoiceField,
     DateRangeField,
     DateTimeRangeField,
+    EmptyValueField,
+    EmptyValueOperation,
     IsoDateTimeField,
     IsoDateTimeRangeField,
     LookupChoiceField,
@@ -53,6 +55,7 @@ __all__ = [
     "DateTimeFilter",
     "DateTimeFromToRangeFilter",
     "DurationFilter",
+    "EmptyValueFilter",
     "Filter",
     "IsoDateTimeFilter",
     "IsoDateTimeFromToRangeFilter",
@@ -170,6 +173,116 @@ class Filter:
 
 class CharFilter(Filter):
     field_class = forms.CharField
+
+
+class EmptyValueFilter(CharFilter):
+    """
+    A text filter with an explicit empty-value operator protocol.
+
+    Unlike filters that reserve a magic comparison value (such as the string
+    ``"null"``) to mean SQL ``NULL``, the comparison value and the operator are
+    submitted and cleaned as two separate parameters:
+
+    * the value is submitted under the filter's name (``?name=value``)
+    * the operator is submitted as ``?name__operator=<operator>``
+
+    Supported operators are:
+
+    * ``equals`` / ``not_equals`` -- (in)equality with the value. An empty
+      string value compares against the empty string and the literal string
+      ``"null"`` is an ordinary value.
+    * ``isnull`` / ``isnotnull`` -- the column is / is not SQL ``NULL``.
+    * ``isempty`` / ``isnotempty`` -- the column is / is not the empty string.
+
+    A filter whose declared ``operators`` do not include the submitted operator
+    fails validation at the form stage. With no parameters submitted the filter
+    is skipped, preserving the usual "empty input is not a filter" behavior.
+    """
+
+    field_class = EmptyValueField
+
+    EQUALS = "equals"
+    NOT_EQUALS = "not_equals"
+    IS_NULL = "isnull"
+    IS_NOT_NULL = "isnotnull"
+    IS_EMPTY = "isempty"
+    IS_NOT_EMPTY = "isnotempty"
+
+    operators = (
+        EQUALS,
+        NOT_EQUALS,
+        IS_NULL,
+        IS_NOT_NULL,
+        IS_EMPTY,
+        IS_NOT_EMPTY,
+    )
+
+    def __init__(self, *args, operators=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if operators is not None:
+            self.operators = tuple(operators)
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            field_kwargs = self.extra.copy()
+
+            if settings.DISABLE_HELP_TEXT:
+                field_kwargs.pop("help_text", None)
+
+            self._field = self.field_class(
+                self.operators, label=self.label, **field_kwargs
+            )
+        return self._field
+
+    def normalize_operator(self, operator):
+        if operator in self.operators:
+            return operator
+        return None
+
+    def get_q(self, operation):
+        """
+        Build the ``Q`` predicate for a cleaned ``EmptyValueOperation``.
+        """
+        operator = self.normalize_operator(operation.operator)
+        value = operation.value
+        lookup = "%s__%s" % (self.field_name, self.lookup_expr)
+
+        if operator == self.EQUALS:
+            return Q(**{lookup: value})
+        if operator == self.NOT_EQUALS:
+            return ~Q(**{lookup: value})
+        if operator == self.IS_NULL:
+            return Q(**{"%s__isnull" % self.field_name: True})
+        if operator == self.IS_NOT_NULL:
+            return Q(**{"%s__isnull" % self.field_name: False})
+        if operator == self.IS_EMPTY:
+            return Q(**{lookup: ""})
+        if operator == self.IS_NOT_EMPTY:
+            return ~Q(**{lookup: ""})
+
+        # Validation should have rejected unsupported operators by now, but
+        # fail loudly rather than silently skipping if one reaches the ORM.
+        raise ValueError("Unsupported operator: %r" % operation.operator)
+
+    def filter(self, qs, value):
+        # ``None`` is the compressed result when nothing was submitted; keep
+        # the inherited skip-on-empty-input behavior.
+        if value in EMPTY_VALUES:
+            return qs
+
+        if isinstance(value, EmptyValueOperation):
+            operator = self.normalize_operator(value.operator)
+            if operator is None:
+                return qs
+            value = self.get_q(EmptyValueOperation(operator, value.value))
+
+        if isinstance(value, Q):
+            if self.distinct:
+                qs = qs.distinct()
+            return self.get_method(qs)(value)
+
+        return super().filter(qs, value)
 
 
 class BooleanFilter(Filter):

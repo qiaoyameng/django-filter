@@ -34,6 +34,7 @@ from django_filters.filters import (
     DateTimeFilter,
     DateTimeFromToRangeFilter,
     DurationFilter,
+    EmptyValueFilter,
     Filter,
     IsoDateTimeFromToRangeFilter,
     LookupChoiceFilter,
@@ -172,6 +173,92 @@ class CharFilterTests(TestCase):
         f = CharFilter()
         field = f.field
         self.assertIsInstance(field, forms.CharField)
+
+
+class EmptyValueFilterTests(TestCase):
+    def test_default_field_and_operators(self):
+        f = EmptyValueFilter()
+        from django_filters.fields import EmptyValueField
+
+        self.assertIsInstance(f.field, EmptyValueField)
+        self.assertEqual(
+            f.operators,
+            (
+                "equals",
+                "not_equals",
+                "isnull",
+                "isnotnull",
+                "isempty",
+                "isnotempty",
+            ),
+        )
+
+    def test_restricted_operators(self):
+        f = EmptyValueFilter(operators=["equals", "isnull"])
+        self.assertEqual(f.operators, ("equals", "isnull"))
+        choice_values = [
+            value for value, label in f.field.fields[1].choices if value
+        ]
+        self.assertEqual(choice_values, ["equals", "isnull"])
+
+    def test_filter_skips_empty_values(self):
+        qs = mock.Mock(spec=["filter", "exclude"])
+        f = EmptyValueFilter(field_name="somefield")
+        for empty in (None, "", [], (), {}):
+            self.assertEqual(f.filter(qs, empty), qs)
+
+    def test_empty_string_operation_is_not_short_circuited(self):
+        from django_filters.fields import EmptyValueOperation
+
+        qs = mock.Mock(spec=["filter"])
+        f = EmptyValueFilter(field_name="somefield")
+        f.filter(qs, EmptyValueOperation("equals", ""))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('somefield__exact', ''))")
+
+    def test_isnull_operation(self):
+        from django_filters.fields import EmptyValueOperation
+
+        qs = mock.Mock(spec=["filter"])
+        f = EmptyValueFilter(field_name="somefield")
+        f.filter(qs, EmptyValueOperation("isnull", None))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('somefield__isnull', True))")
+
+    def test_isempty_operation(self):
+        from django_filters.fields import EmptyValueOperation
+
+        qs = mock.Mock(spec=["filter"])
+        f = EmptyValueFilter(field_name="somefield")
+        f.filter(qs, EmptyValueOperation("isempty", None))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('somefield__exact', ''))")
+
+    def test_negated_operations(self):
+        from django_filters.fields import EmptyValueOperation
+
+        qs = mock.Mock(spec=["filter"])
+        f = EmptyValueFilter(field_name="somefield")
+        f.filter(qs, EmptyValueOperation("not_equals", "null"))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(NOT (AND: ('somefield__exact', 'null')))")
+
+        f.filter(qs, EmptyValueOperation("isnotnull", None))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(AND: ('somefield__isnull', False))")
+
+        f.filter(qs, EmptyValueOperation("isnotempty", None))
+        (q,), kwargs = qs.filter.call_args
+        self.assertEqual(str(q), "(NOT (AND: ('somefield__exact', '')))")
+
+    def test_exclude_uses_exclude_method(self):
+        from django_filters.fields import EmptyValueOperation
+
+        qs = mock.Mock(spec=["filter", "exclude"])
+        f = EmptyValueFilter(field_name="somefield", exclude=True)
+        f.filter(qs, EmptyValueOperation("isnull", None))
+        (q,), kwargs = qs.exclude.call_args
+        self.assertEqual(str(q), "(AND: ('somefield__isnull', True))")
 
 
 class UUIDFilterTests(TestCase):

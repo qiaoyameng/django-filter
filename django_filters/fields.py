@@ -13,6 +13,7 @@ from .widgets import (
     BaseCSVWidget,
     CSVWidget,
     DateRangeWidget,
+    EmptyValueWidget,
     LookupChoiceWidget,
     RangeWidget,
 )
@@ -120,6 +121,19 @@ class LookupChoiceField(forms.MultiValueField):
                         self.error_messages["lookup_required"], code="lookup_required"
                     )
         return None
+
+
+class EmptyValueOperation(namedtuple("EmptyValueOperation", ("operator", "value"))):
+    """
+    The cleaned result of an :class:`EmptyValueField`.
+
+    ``operator`` is one of the supported operator strings (e.g. ``"equals"``)
+    and ``value`` is the independently cleaned comparison value, which may be
+    ``None`` when the value parameter was not provided or the empty string when
+    it was provided but blank.
+    """
+
+    __slots__ = ()
 
 
 class IsoDateTimeField(forms.DateTimeField):
@@ -322,3 +336,108 @@ class ModelMultipleChoiceField(ChoiceIteratorMixin, forms.ModelMultipleChoiceFie
         result = list(super()._check_values(value))
         result += [self.null_value] if null else []
         return result
+
+
+class EmptyValueTextField(forms.CharField):
+    """
+    A ``CharField`` that preserves ``None`` for missing input instead of
+    normalizing it to the empty string. This lets the parent
+    ``MultiValueField`` tell an omitted value apart from a provided-but-blank
+    value, so an empty-string comparison is not mistaken for "no filter".
+    """
+
+    def to_python(self, value):
+        if value is None:
+            return None
+        return super().to_python(value)
+
+
+class EmptyValueOperatorField(ChoiceField):
+    """
+    Select field for the explicit empty-value operator. Hyphens in the
+    submitted value are accepted as aliases for underscores (e.g.
+    ``not-equals`` -> ``not_equals``). Hyphens may be omitted as well
+    (``is-null`` -> ``isnull``); any value that is not a declared choice
+    raises a validation error at the form stage.
+    """
+
+    operator_aliases = {
+        "is_null": "isnull",
+        "is_not_null": "isnotnull",
+        "is_empty": "isempty",
+        "is_not_empty": "isnotempty",
+    }
+
+    def __init__(self, operators, *args, **kwargs):
+        kwargs["choices"] = [(op, pretty_operator(op)) for op in operators]
+        super().__init__(*args, **kwargs)
+
+    def to_python(self, value):
+        if isinstance(value, str):
+            value = value.replace("-", "_")
+            value = self.operator_aliases.get(value, value)
+        return value
+
+
+class EmptyValueField(forms.MultiValueField):
+    """
+    Form field for the explicit empty-value operator protocol.
+
+    The operator and the comparison value are submitted and cleaned as two
+    independent parameters (``<name>`` for the value and ``<name>__operator``
+    for the operator). The operator therefore cannot be a magic value smuggled
+    through the value parameter -- a literal ``"null"`` is just an ordinary
+    comparison value.
+    """
+
+    widget = EmptyValueWidget
+
+    default_error_messages = {
+        "unsupported_operator": _(
+            "Select a valid choice. That choice is not one of the available choices."
+        ),
+    }
+
+    def __init__(self, operators, value_field=None, *args, **kwargs):
+        self.operators = tuple(operators)
+        if value_field is None:
+            value_field = EmptyValueTextField(required=False)
+        operator_field = EmptyValueOperatorField(
+            self.operators, required=False
+        )
+        fields = (value_field, operator_field)
+        kwargs["widget"] = self.widget(widgets=[f.widget for f in fields])
+        kwargs.setdefault("require_all_fields", False)
+        super().__init__(fields, *args, **kwargs)
+
+    def compress(self, data_list):
+        if not data_list or len(data_list) != 2:
+            return None
+
+        value, operator = data_list
+
+        # No operator selected -> no explicit empty-value operation.
+        if operator in EMPTY_VALUES:
+            # A missing value still means "no filter"; only a provided value
+            # (including the empty string) falls back to an equals comparison.
+            return EmptyValueOperation("equals", value) if value is not None else None
+
+        # An explicit operator without a value is only meaningful for the
+        # unary null/empty checks; equality against a missing value would
+        # silently become a NULL comparison, so skip the filter instead.
+        if value is None and operator in {"equals", "not_equals"}:
+            return None
+
+        if operator not in self.operators:
+            # The operator ChoiceField normally rejects this; keep an
+            # explicit guard so a replaced value field cannot bypass it.
+            raise forms.ValidationError(
+                self.error_messages["unsupported_operator"],
+                code="unsupported_operator",
+            )
+
+        return EmptyValueOperation(operator, value)
+
+
+def pretty_operator(operator):
+    return operator.replace("_", " ")
