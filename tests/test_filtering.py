@@ -1,6 +1,8 @@
 import contextlib
 import datetime
+import types
 import unittest
+import zoneinfo
 from operator import attrgetter
 from unittest import mock
 
@@ -30,8 +32,11 @@ from django_filters.filters import (
     RangeFilter,
     TimeRangeFilter,
     TypedMultipleChoiceFilter,
+    TimezoneAwareDateFromToRangeFilter,
+    TimezoneAwareDateTimeFromToRangeFilter,
 )
 from django_filters.filterset import FilterSet
+from django_filters.timezone import EARLIER, LATER, RAISE, SHIFT_FORWARD
 from django_filters.widgets import QueryArrayWidget
 
 from .models import (
@@ -1034,6 +1039,226 @@ class DateTimeFromToRangeFilterTests(TestCase):
             }
         )
         self.assertEqual(len(results.qs), 2)
+
+
+class TimezoneAwareDateFromToRangeFilterTests(TestCase):
+    def test_spring_forward_day_boundaries_in_sqlite(self):
+        for published in [
+            datetime.datetime(2024, 3, 30, 22, 59, 59, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 3, 30, 23, 0, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 3, 31, 21, 59, 59, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 3, 31, 22, 0, tzinfo=datetime.timezone.utc),
+        ]:
+            Article.objects.create(published=published)
+
+        class F(FilterSet):
+            published = TimezoneAwareDateFromToRangeFilter(
+                timezone="Europe/Paris",
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=LATER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        results = F(
+            data={"published_after": "2024-03-31", "published_before": "2024-03-31"}
+        )
+        self.assertEqual(results.qs.count(), 2)
+        self.assertEqual(
+            list(results.qs.values_list("published", flat=True)),
+            [
+                datetime.datetime(2024, 3, 30, 23, 0, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2024, 3, 31, 21, 59, 59, tzinfo=datetime.timezone.utc),
+            ],
+        )
+
+    def test_fall_back_day_boundaries_in_sqlite(self):
+        for published in [
+            datetime.datetime(2024, 10, 26, 21, 59, 59, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 10, 26, 22, 0, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 10, 27, 22, 59, 59, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 10, 27, 23, 0, tzinfo=datetime.timezone.utc),
+        ]:
+            Article.objects.create(published=published)
+
+        class F(FilterSet):
+            published = TimezoneAwareDateFromToRangeFilter(
+                timezone="Europe/Paris",
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=LATER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        results = F(
+            data={"published_after": "2024-10-27", "published_before": "2024-10-27"}
+        )
+        self.assertEqual(results.qs.count(), 2)
+        self.assertEqual(
+            list(results.qs.values_list("published", flat=True)),
+            [
+                datetime.datetime(2024, 10, 26, 22, 0, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2024, 10, 27, 22, 59, 59, tzinfo=datetime.timezone.utc),
+            ],
+        )
+
+    def test_timezone_from_validated_request_context(self):
+        Article.objects.create(
+            published=datetime.datetime(2024, 3, 30, 23, 0, tzinfo=datetime.timezone.utc)
+        )
+        Article.objects.create(
+            published=datetime.datetime(2024, 3, 30, 22, 59, tzinfo=datetime.timezone.utc)
+        )
+
+        class F(FilterSet):
+            published = TimezoneAwareDateFromToRangeFilter(
+                timezone=lambda request: request.validated_timezone,
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=LATER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        request = types.SimpleNamespace(
+            validated_timezone=zoneinfo.ZoneInfo("Europe/Paris")
+        )
+        results = F(
+            {"published_after": "2024-03-31", "published_before": "2024-03-31"},
+            request=request,
+        )
+
+        self.assertTrue(results.is_valid())
+        self.assertEqual(results.qs.count(), 1)
+
+    @override_settings(TIME_ZONE="Europe/Paris")
+    def test_timezone_defaults_to_server_configuration(self):
+        Article.objects.create(
+            published=datetime.datetime(
+                2024, 3, 30, 23, 0, tzinfo=datetime.timezone.utc
+            )
+        )
+
+        class F(FilterSet):
+            published = TimezoneAwareDateFromToRangeFilter(
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=LATER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        results = F(
+            {"published_after": "2024-03-31", "published_before": "2024-03-31"}
+        )
+
+        self.assertEqual(results.qs.count(), 1)
+
+    def test_invalid_timezone_is_form_error(self):
+        class F(FilterSet):
+            published = TimezoneAwareDateFromToRangeFilter(
+                timezone="Not/AZone",
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=LATER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        results = F(
+            {"published_after": "2024-03-31", "published_before": "2024-03-31"}
+        )
+
+        self.assertFalse(results.is_valid())
+        self.assertIn("published", results.errors)
+
+    def test_empty_value_does_not_resolve_request_timezone(self):
+        def timezone(_request):
+            raise ValueError("timezone missing")
+
+        class F(FilterSet):
+            published = TimezoneAwareDateFromToRangeFilter(
+                timezone=timezone,
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=LATER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        results = F({}, request=types.SimpleNamespace())
+
+        self.assertTrue(results.is_valid())
+        self.assertEqual(results.qs.count(), 0)
+
+
+class TimezoneAwareDateTimeFromToRangeFilterTests(TestCase):
+    def test_explicit_offsets_select_distinct_fold_instants(self):
+        Article.objects.create(
+            published=datetime.datetime(2024, 10, 27, 0, 30, tzinfo=datetime.timezone.utc)
+        )
+        Article.objects.create(
+            published=datetime.datetime(2024, 10, 27, 1, 30, tzinfo=datetime.timezone.utc)
+        )
+
+        class F(FilterSet):
+            published = TimezoneAwareDateTimeFromToRangeFilter(
+                timezone="Europe/Paris",
+                nonexistent_policy=SHIFT_FORWARD,
+                ambiguous_policy=EARLIER,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        earlier = F(
+            {
+                "published_after": "2024-10-27 02:30+02:00",
+                "published_before": "2024-10-27 02:30+02:00",
+            }
+        )
+        later = F(
+            {
+                "published_after": "2024-10-27 02:30+01:00",
+                "published_before": "2024-10-27 02:30+01:00",
+            }
+        )
+
+        self.assertEqual(
+            list(earlier.qs.values_list("published", flat=True)),
+            [datetime.datetime(2024, 10, 27, 0, 30, tzinfo=datetime.timezone.utc)],
+        )
+        self.assertEqual(
+            list(later.qs.values_list("published", flat=True)),
+            [datetime.datetime(2024, 10, 27, 1, 30, tzinfo=datetime.timezone.utc)],
+        )
+
+    def test_nonexistent_datetime_is_form_error(self):
+        class F(FilterSet):
+            published = TimezoneAwareDateTimeFromToRangeFilter(
+                timezone="Europe/Paris",
+                nonexistent_policy=RAISE,
+                ambiguous_policy=RAISE,
+            )
+
+            class Meta:
+                model = Article
+                fields = ["published"]
+
+        results = F(
+            {"published_after": "2024-03-31 02:30", "published_before": ""}
+        )
+
+        self.assertFalse(results.is_valid())
 
 
 class IsoDateTimeFromToRangeFilterTests(TestCase):

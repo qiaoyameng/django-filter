@@ -1,7 +1,7 @@
 import inspect
 import unittest
 from collections import OrderedDict
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from unittest import mock
 
 import django
@@ -46,6 +46,8 @@ from django_filters.filters import (
     RangeFilter,
     TimeFilter,
     TimeRangeFilter,
+    TimezoneAwareDateFromToRangeFilter,
+    TimezoneAwareDateTimeFromToRangeFilter,
     TypedMultipleChoiceFilter,
     UUIDFilter,
 )
@@ -1271,6 +1273,38 @@ class DateTimeFromToRangeFilterTests(TestCase):
         qs.filter.assert_called_once_with(
             None__range=(datetime(2015, 4, 7, 8, 30), datetime(2015, 9, 6, 11, 45))
         )
+
+
+class TimezoneAwareDateFromToRangeFilterTests(TestCase):
+    def test_uses_half_open_utc_lookups(self):
+        qs = mock.Mock(spec=["filter"])
+        value = mock.Mock(
+            start=datetime(2024, 3, 30, 23, tzinfo=timezone.utc),
+            stop=datetime(2024, 3, 31, 22, tzinfo=timezone.utc),
+        )
+        f = TimezoneAwareDateFromToRangeFilter(
+            nonexistent_policy="shift_forward",
+            ambiguous_policy="later",
+        )
+
+        f.filter(qs, value)
+
+        qs.filter.assert_called_once_with(
+            None__gte=value.start,
+            None__lt=value.stop,
+        )
+
+    def test_invalid_policies_are_rejected(self):
+        with self.assertRaises(ValueError):
+            TimezoneAwareDateFromToRangeFilter(
+                nonexistent_policy="invalid",
+                ambiguous_policy="later",
+            )
+        with self.assertRaises(ValueError):
+            TimezoneAwareDateTimeFromToRangeFilter(
+                nonexistent_policy="shift_forward",
+                ambiguous_policy="invalid",
+            )
 
 
 class IsoDateTimeFromToRangeFilterTests(TestCase):

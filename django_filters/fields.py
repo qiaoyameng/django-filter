@@ -1,13 +1,24 @@
 from collections import namedtuple
-from datetime import datetime, time
+from datetime import date, datetime, time, timezone
 
 from django import forms
+from django.forms.fields import BaseTemporalField
 from django.utils.dateparse import parse_datetime
 from django.utils.encoding import force_str
+from django.utils.timezone import get_default_timezone
 from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
 from .constants import EMPTY_VALUES
+from .timezone import (
+    AmbiguousDateTimeError,
+    NonexistentDateTimeError,
+    TimezoneResolutionError,
+    date_to_utc_datetime,
+    localize_datetime,
+    resolve_timezone,
+    validate_policies,
+)
 from .utils import handle_timezone
 from .widgets import (
     BaseCSVWidget,
@@ -75,6 +86,159 @@ class IsoDateTimeRangeField(RangeField):
     def __init__(self, *args, **kwargs):
         fields = (IsoDateTimeField(), IsoDateTimeField())
         super().__init__(fields, *args, **kwargs)
+
+
+class TimezoneAwareDateTimeField(forms.DateTimeField):
+    """Parse datetimes and return unambiguous UTC-aware values."""
+
+    def __init__(
+        self,
+        *,
+        timezone,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs,
+    ):
+        self.timezone = timezone
+        self.nonexistent_policy = nonexistent_policy
+        self.ambiguous_policy = ambiguous_policy
+        validate_policies(nonexistent_policy, ambiguous_policy)
+        super().__init__(**kwargs)
+
+    def to_python(self, value):
+        if value in self.empty_values:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, date):
+            parsed = datetime.combine(value, time.min)
+        else:
+            text = value.strip()
+            parsed = parse_datetime(text)
+            if parsed is None:
+                parsed = BaseTemporalField.to_python(self, text)
+
+        try:
+            parsed = localize_datetime(
+                parsed,
+                self.timezone,
+                nonexistent=self.nonexistent_policy,
+                ambiguous=self.ambiguous_policy,
+            ).astimezone(timezone.utc)
+        except (AmbiguousDateTimeError, NonexistentDateTimeError) as exc:
+            raise forms.ValidationError(str(exc), code="invalid_timezone_datetime")
+        return parsed
+
+
+class TimezoneAwareRangeMixin:
+    """Resolve the configured timezone during form validation."""
+
+    def __init__(
+        self, fields=None, *, timezone, nonexistent_policy, ambiguous_policy, **kwargs
+    ):
+        self.timezone = timezone
+        self.nonexistent_policy = nonexistent_policy
+        self.ambiguous_policy = ambiguous_policy
+        self.resolved_timezone = None
+        validate_policies(nonexistent_policy, ambiguous_policy)
+        super().__init__(fields, **kwargs)
+
+    def resolve_timezone(self):
+        value = get_default_timezone() if self.timezone is None else self.timezone
+        return resolve_timezone(value)
+
+    def clean(self, value):
+        if not value or not any(item not in self.empty_values for item in value):
+            return super().clean(value)
+        try:
+            self.resolved_timezone = self.resolve_timezone()
+            for field in getattr(self, "fields", ()):
+                field.timezone = self.resolved_timezone
+            return super().clean(value)
+        except (
+            AmbiguousDateTimeError,
+            NonexistentDateTimeError,
+            TimezoneResolutionError,
+        ) as exc:
+            code = (
+                "invalid_timezone"
+                if isinstance(exc, TimezoneResolutionError)
+                else "invalid_timezone_datetime"
+            )
+            raise forms.ValidationError(str(exc), code=code)
+
+
+class TimezoneAwareDateTimeRangeField(TimezoneAwareRangeMixin, RangeField):
+    """A datetime range in an explicitly configured timezone."""
+
+    widget = DateRangeWidget
+
+    def __init__(
+        self,
+        *,
+        timezone,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs,
+    ):
+        field_kwargs = {
+            "nonexistent_policy": nonexistent_policy,
+            "ambiguous_policy": ambiguous_policy,
+        }
+        fields = (
+            TimezoneAwareDateTimeField(timezone=None, **field_kwargs),
+            TimezoneAwareDateTimeField(timezone=None, **field_kwargs),
+        )
+        super().__init__(
+            fields,
+            timezone=timezone,
+            nonexistent_policy=nonexistent_policy,
+            ambiguous_policy=ambiguous_policy,
+            **kwargs,
+        )
+
+
+class TimezoneAwareDateRangeField(TimezoneAwareRangeMixin, RangeField):
+    """A local date range compressed to a half-open UTC datetime range."""
+
+    widget = DateRangeWidget
+
+    def __init__(
+        self,
+        *,
+        timezone,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs,
+    ):
+        super().__init__(
+            (forms.DateField(), forms.DateField()),
+            timezone=timezone,
+            nonexistent_policy=nonexistent_policy,
+            ambiguous_policy=ambiguous_policy,
+            **kwargs,
+        )
+
+    def compress(self, data_list):
+        if data_list:
+            start_date, stop_date = data_list
+            if start_date:
+                start_date = date_to_utc_datetime(
+                    start_date,
+                    self.resolved_timezone,
+                    nonexistent=self.nonexistent_policy,
+                    ambiguous=self.ambiguous_policy,
+                )
+            if stop_date:
+                stop_date = date_to_utc_datetime(
+                    stop_date,
+                    self.resolved_timezone,
+                    nonexistent=self.nonexistent_policy,
+                    ambiguous=self.ambiguous_policy,
+                    end=True,
+                )
+            return slice(start_date, stop_date)
+        return None
 
 
 class TimeRangeField(RangeField):

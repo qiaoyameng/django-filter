@@ -27,6 +27,16 @@ from .fields import (
     MultipleChoiceField,
     RangeField,
     TimeRangeField,
+    TimezoneAwareDateRangeField,
+    TimezoneAwareDateTimeRangeField,
+)
+from .timezone import (
+    EARLIER,
+    LATER,
+    RAISE,
+    SHIFT_BACKWARD,
+    SHIFT_FORWARD,
+    validate_policies,
 )
 from .utils import get_model_field, label_for_filter
 
@@ -63,9 +73,16 @@ __all__ = [
     "NumberFilter",
     "NumericRangeFilter",
     "OrderingFilter",
+    "EARLIER",
+    "LATER",
     "RangeFilter",
+    "RAISE",
+    "SHIFT_BACKWARD",
+    "SHIFT_FORWARD",
     "TimeFilter",
     "TimeRangeFilter",
+    "TimezoneAwareDateFromToRangeFilter",
+    "TimezoneAwareDateTimeFromToRangeFilter",
     "TypedChoiceFilter",
     "TypedMultipleChoiceFilter",
     "UUIDFilter",
@@ -527,6 +544,85 @@ class DateFromToRangeFilter(RangeFilter):
 
 class DateTimeFromToRangeFilter(RangeFilter):
     field_class = DateTimeRangeField
+
+
+class TimezoneAwareRangeFilterMixin:
+    """Supply a validated server- or request-provided timezone to its field."""
+
+    def __init__(
+        self,
+        *args,
+        timezone=None,
+        nonexistent_policy,
+        ambiguous_policy,
+        **kwargs,
+    ):
+        validate_policies(nonexistent_policy, ambiguous_policy)
+        self.timezone = timezone
+        self.nonexistent_policy = nonexistent_policy
+        self.ambiguous_policy = ambiguous_policy
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        try:
+            return self.parent.request
+        except AttributeError:
+            return None
+
+    def get_timezone(self):
+        request = self.get_request()
+        if callable(self.timezone):
+            return self.timezone(request)
+        return self.timezone
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            field_kwargs = self.extra.copy()
+
+            if settings.DISABLE_HELP_TEXT:
+                field_kwargs.pop("help_text", None)
+
+            self._field = self.field_class(
+                label=self.label,
+                timezone=self.get_timezone,
+                nonexistent_policy=self.nonexistent_policy,
+                ambiguous_policy=self.ambiguous_policy,
+                **field_kwargs,
+            )
+        return self._field
+
+
+class TimezoneAwareDateFromToRangeFilter(TimezoneAwareRangeFilterMixin, Filter):
+    """Filter a datetime field by a local date's half-open UTC interval."""
+
+    field_class = TimezoneAwareDateRangeField
+
+    def filter(self, qs, value):
+        if value:
+            lookup_prefix = "%s__" % self.field_name
+            filter_qs = self.get_method(qs)
+            if value.start is not None and value.stop is not None:
+                qs = filter_qs(
+                    **{
+                        lookup_prefix + "gte": value.start,
+                        lookup_prefix + "lt": value.stop,
+                    }
+                )
+            elif value.start is not None:
+                qs = filter_qs(**{lookup_prefix + "gte": value.start})
+            elif value.stop is not None:
+                qs = filter_qs(**{lookup_prefix + "lt": value.stop})
+            else:
+                return qs
+            return qs.distinct() if self.distinct else qs
+        return qs
+
+
+class TimezoneAwareDateTimeFromToRangeFilter(TimezoneAwareRangeFilterMixin, RangeFilter):
+    """Filter a datetime field using explicit timezone-aware boundaries."""
+
+    field_class = TimezoneAwareDateTimeRangeField
 
 
 class IsoDateTimeFromToRangeFilter(RangeFilter):

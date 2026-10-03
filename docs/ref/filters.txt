@@ -569,6 +569,36 @@ Example::
     f = F({'published_before': '2016-01-01 10:00'})
     assert len(f.qs) == 2
 
+.. class:: TimezoneAwareDateFromToRangeFilter
+
+    Filters a :class:`~django.db.models.DateTimeField` for one or more local
+    dates. Dates are converted to a half-open UTC interval
+    (``start <= value < stop``), so DST transition days are not assumed to be
+    24 hours long.
+
+    The timezone may be a name, ``tzinfo``, or a callable that receives the
+    FilterSet ``request`` and returns a timezone already validated by the
+    application. Omit it to use Django's ``TIME_ZONE`` setting. Invalid
+    timezones are reported as form errors.
+
+    Naive local datetimes require an explicit policy for both nonexistent and
+    ambiguous wall times::
+
+        published = TimezoneAwareDateFromToRangeFilter(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+        )
+
+
+.. class:: TimezoneAwareDateTimeFromToRangeFilter
+
+    Like :class:`~django_filters.filters.DateTimeFromToRangeFilter`, but
+    interprets naive values in the supplied timezone and returns form errors
+    for nonexistent or ambiguous wall times unless explicit policies are given.
+    Inputs with an explicit UTC offset always identify an instant and retain
+    that offset.
+
 .. class:: IsoDateTimeFromToRangeFilter
 
 Similar to a :class:`~django_filters.filters.RangeFilter` except it uses ISO 8601

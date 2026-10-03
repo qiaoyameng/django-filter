@@ -2,6 +2,7 @@ import datetime as dt
 import decimal
 import unittest
 from datetime import datetime, time, timedelta, tzinfo
+from zoneinfo import ZoneInfo
 
 import django
 import pytz
@@ -21,6 +22,14 @@ from django_filters.fields import (
     LookupChoiceField,
     RangeField,
     TimeRangeField,
+    TimezoneAwareDateRangeField,
+    TimezoneAwareDateTimeRangeField,
+)
+from django_filters.timezone import (
+    EARLIER,
+    LATER,
+    RAISE,
+    SHIFT_FORWARD,
 )
 from django_filters.widgets import BaseCSVWidget, CSVWidget, RangeWidget
 
@@ -83,6 +92,162 @@ class DateRangeFieldTests(TestCase):
             ),
         )
         self.assertIsNone(f.clean([]))
+
+
+class TimezoneAwareDateRangeFieldTests(TestCase):
+    def test_spring_forward_date_uses_half_open_utc_range(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-03-31", "2024-03-31"]),
+            slice(
+                datetime(2024, 3, 30, 23, tzinfo=dt.timezone.utc),
+                datetime(2024, 3, 31, 22, tzinfo=dt.timezone.utc),
+            ),
+        )
+
+    def test_fall_back_date_uses_half_open_utc_range(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-10-27", "2024-10-27"]),
+            slice(
+                datetime(2024, 10, 26, 22, tzinfo=dt.timezone.utc),
+                datetime(2024, 10, 27, 23, tzinfo=dt.timezone.utc),
+            ),
+        )
+
+    def test_midnight_gap_and_fold_policies(self):
+        gap_field = TimezoneAwareDateRangeField(
+            timezone="America/Sao_Paulo",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+        )
+        midnight_gap_field = TimezoneAwareDateRangeField(
+            timezone="America/Santiago",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+        )
+        midnight_fold_earlier_field = TimezoneAwareDateRangeField(
+            timezone="America/Havana",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+        )
+        midnight_fold_later_field = TimezoneAwareDateRangeField(
+            timezone="America/Havana",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+        )
+
+        self.assertEqual(
+            gap_field.clean(["2017-10-15", "2017-10-15"]),
+            slice(
+                datetime(2017, 10, 15, 3, tzinfo=dt.timezone.utc),
+                datetime(2017, 10, 16, 2, tzinfo=dt.timezone.utc),
+            ),
+        )
+        self.assertEqual(
+            gap_field.clean(["2017-02-18", "2017-02-18"]),
+            slice(
+                datetime(2017, 2, 18, 2, tzinfo=dt.timezone.utc),
+                datetime(2017, 2, 19, 3, tzinfo=dt.timezone.utc),
+            ),
+        )
+        self.assertEqual(
+            midnight_gap_field.clean(["2024-09-08", "2024-09-08"]),
+            slice(
+                datetime(2024, 9, 8, 4, tzinfo=dt.timezone.utc),
+                datetime(2024, 9, 9, 3, tzinfo=dt.timezone.utc),
+            ),
+        )
+        self.assertEqual(
+            midnight_fold_earlier_field.clean(["2024-11-03", "2024-11-03"]),
+            slice(
+                datetime(2024, 11, 3, 4, tzinfo=dt.timezone.utc),
+                datetime(2024, 11, 4, 5, tzinfo=dt.timezone.utc),
+            ),
+        )
+        self.assertEqual(
+            midnight_fold_later_field.clean(["2024-11-03", "2024-11-03"]),
+            slice(
+                datetime(2024, 11, 3, 5, tzinfo=dt.timezone.utc),
+                datetime(2024, 11, 4, 5, tzinfo=dt.timezone.utc),
+            ),
+        )
+
+    def test_tzinfo_timezone(self):
+        field = TimezoneAwareDateRangeField(
+            timezone=ZoneInfo("Europe/Paris"),
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+            required=False,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-03-31", ""]).start,
+            datetime(2024, 3, 30, 23, tzinfo=dt.timezone.utc),
+        )
+
+    def test_invalid_timezone_is_form_error(self):
+        field = TimezoneAwareDateRangeField(
+            timezone="Not/AZone",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=LATER,
+        )
+
+        with self.assertRaises(forms.ValidationError):
+            field.clean(["2024-03-31", "2024-03-31"])
+
+
+class TimezoneAwareDateTimeRangeFieldTests(TestCase):
+    def test_nonexistent_and_ambiguous_naive_datetimes_raise_form_errors(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=RAISE,
+            ambiguous_policy=RAISE,
+        )
+
+        with self.assertRaises(forms.ValidationError):
+            field.clean(["2024-03-31 02:30", "2024-03-31 03:00"])
+
+        with self.assertRaises(forms.ValidationError):
+            field.clean(["2024-10-27 02:30", "2024-10-27 03:00"])
+
+    def test_explicit_offsets_are_preserved(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=RAISE,
+            ambiguous_policy=RAISE,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-10-27 02:30+02:00", "2024-10-27 02:30+01:00"]),
+            slice(
+                datetime(2024, 10, 27, 0, 30, tzinfo=dt.timezone.utc),
+                datetime(2024, 10, 27, 1, 30, tzinfo=dt.timezone.utc),
+            ),
+        )
+
+    def test_ambiguity_policy_is_explicit(self):
+        field = TimezoneAwareDateTimeRangeField(
+            timezone="Europe/Paris",
+            nonexistent_policy=SHIFT_FORWARD,
+            ambiguous_policy=EARLIER,
+            required=False,
+        )
+
+        self.assertEqual(
+            field.clean(["2024-10-27 02:30", ""]).start,
+            datetime(2024, 10, 27, 0, 30, tzinfo=dt.timezone.utc),
+        )
 
 
 class DateTimeRangeFieldTests(TestCase):
