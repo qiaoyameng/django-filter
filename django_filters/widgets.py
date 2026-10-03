@@ -152,6 +152,27 @@ class LookupChoiceWidget(SuffixedMultiWidget):
         return value
 
 
+class EmptyValueWidget(SuffixedMultiWidget):
+    """
+    Render the explicit empty-value input protocol: a value input paired with
+    a separate operator select. The operator is submitted as "<name>_operator"
+    instead of being smuggled through the value.
+    """
+
+    template_name = "django_filters/widgets/multiwidget.html"
+    suffixes = [None, "operator"]
+
+    def __init__(self, widgets=None, attrs=None):
+        if widgets is None:
+            widgets = (forms.TextInput, forms.Select)
+        super().__init__(widgets, attrs)
+
+    def decompress(self, value):
+        if value is None:
+            return [None, None]
+        return [value.value, value.operator]
+
+
 class BooleanWidget(forms.Select):
     """Convert true/false values into the internal Python True/False.
     This can be used for AJAX queries that pass true/false from JavaScript's

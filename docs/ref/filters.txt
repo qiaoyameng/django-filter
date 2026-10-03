@@ -175,6 +175,44 @@ Filters
 This filter does simple character matches, used with :class:`~django.db.models.CharField` and
 :class:`~django.db.models.TextField` by default.
 
+.. class:: EmptyValueFilter
+
+This filter queries text fields through an **explicit empty-value input
+protocol** that keeps the value and the operator as separate inputs. The form
+renders a value input (``<name>``) and an operator select
+(``<name>_operator``), so neither the empty string nor a literal ``"null"``
+string is consumed as a sentinel for SQL ``NULL``.
+
+The supported operators are:
+
+* ``equals`` -- value comparison, including against the empty string;
+* ``not_equals`` -- negated comparison (``NULL`` rows are retained);
+* ``isnull`` / ``isnotnull`` -- SQL ``NULL`` state;
+* ``isempty`` / ``isnotempty`` -- empty string state.
+
+If neither parameter is provided the filter is not applied. A bare value with
+no operator defaults to ``equals``, and a bare empty value remains a no-op,
+preserving the historical skip-empty-input behavior.
+
+Filter declarations may restrict the available operators with the
+``operators`` argument. Submitting an operator that the filter does not
+support is a form validation error::
+
+    class F(FilterSet):
+        name = EmptyValueFilter(field_name="name")
+        # e.g. operators=("equals", "isnull")
+
+        class Meta:
+            model = Item
+            fields = []
+
+Example query strings::
+
+    ?name_operator=isnull
+    ?name_operator=isempty
+    ?name_operator=equals&name=null      # matches the literal text "null"
+    ?name_operator=equals&name=          # matches the empty string
+
 .. class:: UUIDFilter
 
 This filter matches UUID values, used with :class:`~django.db.models.UUIDField` by default.

@@ -12,13 +12,22 @@ from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
-from .constants import EMPTY_VALUES
+from .constants import (
+    EMPTY_VALUES,
+    EQUALS,
+    IS_EMPTY,
+    IS_NOT_EMPTY,
+    IS_NOT_NULL,
+    IS_NULL,
+    NOT_EQUALS,
+)
 from .fields import (
     BaseCSVField,
     BaseRangeField,
     ChoiceField,
     DateRangeField,
     DateTimeRangeField,
+    EmptyValueField,
     IsoDateTimeField,
     IsoDateTimeRangeField,
     LookupChoiceField,
@@ -51,6 +60,7 @@ __all__ = [
     "DateFromToRangeFilter",
     "DateRangeFilter",
     "DateTimeFilter",
+    "EmptyValueFilter",
     "DateTimeFromToRangeFilter",
     "DurationFilter",
     "Filter",
@@ -170,6 +180,91 @@ class Filter:
 
 class CharFilter(Filter):
     field_class = forms.CharField
+
+
+class EmptyValueFilter(Filter):
+    """
+    Filter text fields through an explicit empty-value input protocol.
+
+    The rendered form provides two inputs per filter: a value input and a
+    separate operator select ("<name>_operator"). The operator is cleaned
+    independently of the value, so SQL NULL, the empty string and a literal
+    "null" value never collide.
+
+    Supported operators are ``equals``, ``not_equals``, ``isnull``,
+    ``isnotnull``, ``isempty`` and ``isnotempty``. Operators that a concrete
+    filter does not support are removed via ``operators``; submitting one then
+    produces a form validation error rather than a query.
+    """
+
+    field_class = forms.CharField
+    outer_class = EmptyValueField
+
+    #: Operators supported by this filter. Filters for field types that cannot
+    #: meaningfully express an operator (e.g. emptiness for numbers) should
+    #: override this.
+    supported_operators = (
+        EQUALS,
+        NOT_EQUALS,
+        IS_NULL,
+        IS_NOT_NULL,
+        IS_EMPTY,
+        IS_NOT_EMPTY,
+    )
+
+    def __init__(self, field_name=None, lookup_expr=None, *, operators=None, **kwargs):
+        self.empty_label = kwargs.pop("empty_label", settings.EMPTY_CHOICE_LABEL)
+        super().__init__(field_name=field_name, lookup_expr=lookup_expr, **kwargs)
+        self.operators = tuple(operators or self.supported_operators)
+        self.outer_class.validate_operators(self.operators)
+
+    @property
+    def field(self):
+        if not hasattr(self, "_field"):
+            inner_field = super().field
+            self._field = self.outer_class(
+                field=inner_field,
+                operators=self.operators,
+                empty_label=self.empty_label,
+                label=self.label,
+                required=self.extra["required"],
+            )
+        return self._field
+
+    def filter(self, qs, value):
+        # ``None`` means no parameter was supplied: leave the queryset
+        # unfiltered. Unlike the generic ``Filter.filter`` short circuit, an
+        # actual empty-string comparison must not be swallowed because it
+        # arrives wrapped in an ``EmptyValue`` instance.
+        if value is None:
+            return qs
+
+        if self.distinct:
+            qs = qs.distinct()
+
+        if value.operator == IS_NULL:
+            predicate = Q(**{"%s__isnull" % self.field_name: True})
+        elif value.operator == IS_NOT_NULL:
+            predicate = Q(**{"%s__isnull" % self.field_name: False})
+        elif value.operator == IS_EMPTY:
+            predicate = Q(**{"%s__%s" % (self.field_name, self.lookup_expr): ""})
+        elif value.operator == IS_NOT_EMPTY:
+            predicate = Q(**{"%s__isnull" % self.field_name: False}) & ~Q(
+                **{"%s__%s" % (self.field_name, self.lookup_expr): ""}
+            )
+        else:
+            # equals and not_equals compare the cleaned value as-is, so a
+            # literal "null" is matched as an ordinary string.
+            predicate = Q(
+                **{"%s__%s" % (self.field_name, self.lookup_expr): value.value}
+            )
+
+        if value.operator == NOT_EQUALS:
+            # ``exclude`` would also drop NULL rows; negate explicitly so that
+            # rows whose value is not equal (including NULL) are retained.
+            predicate = ~predicate
+
+        return self.get_method(qs)(predicate)
 
 
 class BooleanFilter(Filter):

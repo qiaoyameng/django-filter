@@ -1,6 +1,16 @@
 Version 26.1 (2026-07-11)
 -------------------------
 
+* Added ``EmptyValueFilter`` and an explicit empty-value input protocol.
+
+  The value and the operator are submitted as separate inputs
+  (``<name>`` and ``<name>_operator``), allowing text fields to distinguish
+  SQL ``NULL``, the empty string and a literal ``"null"`` value. The
+  ``equals``, ``not_equals``, ``isnull``, ``isnotnull``, ``isempty`` and
+  ``isnotempty`` operators are supported; unsupported operators raise a form
+  validation error. Empty-string comparisons are no longer swallowed by the
+  generic empty-value short circuit.
+
 * Added testing for Django 6.1.
 
   DRF integration will require the upcoming DRF v3.18.

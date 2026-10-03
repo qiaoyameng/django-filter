@@ -210,3 +210,7 @@ class SpacewalkRecord(models.Model):
 
     astronaut = models.CharField(max_length=100)
     duration = models.DurationField()
+
+
+class NullableText(models.Model):
+    label = models.CharField(max_length=20, null=True, blank=True)

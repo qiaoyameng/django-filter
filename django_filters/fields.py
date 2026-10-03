@@ -7,12 +7,23 @@ from django.utils.encoding import force_str
 from django.utils.translation import gettext_lazy as _
 
 from .conf import settings
-from .constants import EMPTY_VALUES
+from .constants import (
+    EMPTY_VALUES,
+    EMPTY_VALUE_OPERATORS,
+    EQUALS,
+    IS_EMPTY,
+    IS_NOT_EMPTY,
+    IS_NOT_NULL,
+    IS_NULL,
+    NOT_EQUALS,
+    VALUELESS_OPERATORS,
+)
 from .utils import handle_timezone
 from .widgets import (
     BaseCSVWidget,
     CSVWidget,
     DateRangeWidget,
+    EmptyValueWidget,
     LookupChoiceWidget,
     RangeWidget,
 )
@@ -120,6 +131,115 @@ class LookupChoiceField(forms.MultiValueField):
                         self.error_messages["lookup_required"], code="lookup_required"
                     )
         return None
+
+
+class EmptyValue(namedtuple("EmptyValue", ("value", "operator"))):
+    """
+    The cleaned result of an :class:`EmptyValueField`.
+
+    ``operator`` is always one of the explicit empty-value operators, so that
+    SQL NULL, the empty string and a literal "null" value remain
+    distinguishable.
+    """
+
+
+class EmptyValueField(forms.MultiValueField):
+    """
+    A value/operator pair implementing the explicit empty-value input
+    protocol.
+
+    The value and the operator are separate form parameters (the operator is
+    read from "<name>_operator"), so neither the empty string nor a literal
+    "null" string is consumed as a NULL sentinel.
+
+    Fields whose filters do not support a given operator simply omit it from
+    ``operators``; submitting it then fails validation at the form stage with
+    the standard "invalid choice" error.
+    """
+
+    default_error_messages = {
+        "value_required": _("Enter a value for the selected operator."),
+    }
+
+    widget_class = EmptyValueWidget
+
+    OPERATOR_CHOICES = (
+        (EQUALS, _("equals")),
+        (NOT_EQUALS, _("does not equal")),
+        (IS_NULL, _("is null")),
+        (IS_NOT_NULL, _("is not null")),
+        (IS_EMPTY, _("is empty")),
+        (IS_NOT_EMPTY, _("is not empty")),
+    )
+
+    def __init__(self, field=None, operators=EMPTY_VALUE_OPERATORS, *args, **kwargs):
+        self.empty_label = kwargs.pop("empty_label", settings.EMPTY_CHOICE_LABEL)
+        self.operators = tuple(operators)
+        self.validate_operators(self.operators)
+
+        value_field = field or forms.CharField()
+        operator_field = forms.ChoiceField(
+            choices=self.get_operator_choices(),
+        )
+        fields = (value_field, operator_field)
+        widget = self.widget_class(widgets=[f.widget for f in fields])
+        kwargs["widget"] = widget
+        kwargs["help_text"] = value_field.help_text
+        super().__init__(fields, *args, **kwargs)
+
+    @classmethod
+    def validate_operators(cls, operators):
+        unknown = set(operators) - set(EMPTY_VALUE_OPERATORS)
+        if unknown:
+            raise ValueError(
+                "Unknown empty-value operator(s): %s" % ", ".join(sorted(unknown))
+            )
+
+    def get_operator_choices(self):
+        labels = dict(self.OPERATOR_CHOICES)
+        choices = [(operator, labels[operator]) for operator in self.operators]
+        if self.empty_label is not None:
+            choices = [("", self.empty_label)] + choices
+        return choices
+
+    def clean(self, value):
+        # Track whether the raw value input was actually provided. An absent
+        # input normalizes to the empty string during cleaning, which would
+        # otherwise be indistinguishable from an explicitly submitted "".
+        self._value_was_omitted = (not value) or value[0] is None
+        return super().clean(value)
+
+    def compress(self, data_list):
+        value, operator = self._split(data_list)
+
+        # No operator selected: a bare value defaults to an "equals"
+        # comparison, while a missing value (both inputs omitted or empty)
+        # means "no parameter" and is left unfiltered. The latter preserves
+        # the historical skip-empty-input behavior.
+        if operator in EMPTY_VALUES:
+            if value in EMPTY_VALUES:
+                return None
+            operator = EQUALS
+
+        if operator in VALUELESS_OPERATORS:
+            return EmptyValue(value=None, operator=operator)
+
+        # With an explicit value-taking operator, an empty string is a valid
+        # value: equals/not_equals can target the empty string itself. Only a
+        # missing value input is rejected.
+        if self._value_was_omitted:
+            raise forms.ValidationError(
+                self.error_messages["value_required"], code="value_required"
+            )
+
+        return EmptyValue(value=value, operator=operator)
+
+    def _split(self, data_list):
+        if not data_list:
+            return None, None
+        if len(data_list) == 1:
+            return data_list[0], None
+        return data_list[0], data_list[1]
 
 
 class IsoDateTimeField(forms.DateTimeField):
